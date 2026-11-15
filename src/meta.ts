@@ -63,16 +63,16 @@ export const CATALOG_COMMENT =
   "views, delete-aware incremental helpers, org metadata and limits, plus a credential-free Salesforce ID toolkit.";
 
 export const CATALOG_DOC_LLM =
-  "The salesforce catalog reads a Salesforce org (read-only). Tier 0 needs nothing: main.id18 / id15 / key_prefix / " +
-  "object_of / is_valid_id / soql_literal work on any exported id column (DuckDB joins are case-sensitive; join on id18). " +
-  "Everything else needs CREATE SECRET (TYPE salesforce, INSTANCE_URL …, plus a JWT bearer, client credentials or refresh " +
-  "token OAuth flow). main.query_object(object_name, fields := […], modified_after := …) and the sobjects.<Object> views " +
-  "(one per object in the ATTACH OBJECTS list) return typed rows: DuckDB WHERE filters, projections and ORDER BY … LIMIT " +
-  "become SOQL. main.soql(query) runs SOQL with a bind-time typed result (fields, parent paths, aggregates, date functions). " +
-  "Large scans move to Bulk API 2.0 jobs automatically. main.updated_ids / deleted_ids give delete-aware increments. " +
-  "main.lookup(sf_id, object_name := …) and main.record(object_name, sf_id) enrich rows per id (LATERAL). meta.* has " +
-  "objects, columns (field → column names), picklist_values, record_types, users, profiles, permission_sets, limits, jobs " +
-  "and org. Column names are lower snake case: StageName → stage_name, Acme__Score__c → acme_score, Account.Name → account_name.";
+  "The salesforce catalog reads one Salesforce org, read-only, so analysts can join CRM records to product usage, " +
+  "billing and support data that Salesforce reports cannot reach. Two tiers: a credential-free Salesforce ID toolkit " +
+  "that works on any exported id column with no secret and no network, and org reads that need CREATE SECRET (TYPE " +
+  "salesforce, INSTANCE_URL …, plus a JWT bearer, client credentials or refresh token OAuth flow). Org reads return rows " +
+  "typed from the org's own describe metadata; DuckDB WHERE filters, projections and ORDER BY … LIMIT are pushed into " +
+  "SOQL, and large scans move to resumable Bulk API 2.0 jobs automatically. Schema main holds the functions (ID toolkit, " +
+  "SOQL scans, per-id LATERAL enrichment, delete-aware incremental helpers); schema meta holds org metadata, API limits " +
+  "and Bulk job tables; schema sobjects has one typed view per object named in the ATTACH OBJECTS option. Scans stop at " +
+  "quota_guard_pct of the daily API allowance. Column names are lower snake case: StageName → stage_name, " +
+  "Acme__Score__c → acme_score, Account.Name → account_name.";
 
 export const CATALOG_DOC_MD =
   "# Salesforce CRM in DuckDB\n\n" +
@@ -84,27 +84,42 @@ export const CATALOG_DOC_MD =
   "**Reference notes.** Scans stop at `quota_guard_pct` (ATTACH option, default 80) of the org's daily API " +
   "allowance, which is shared with its production integrations. Delete-aware incremental helpers refuse windows " +
   "older than the recycle-bin retention rather than return an incomplete delete set. Everything is read-only.\n\n" +
-  `Setup (connected app, certificate, JWT bearer): ${SOURCE_URL}#connect-an-org`;
+  `Setup (connected app, certificate, JWT bearer): ${SOURCE_URL}#connect-an-org\n\n` +
+  "Upstream references: the [Salesforce REST API](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/), " +
+  "[SOQL and SOSL reference](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/soql_sosl/), " +
+  "[Bulk API 2.0](https://developer.salesforce.com/docs/atlas.en-us.api_asynch.meta/api_asynch/), and " +
+  "[OAuth authorization flows](https://help.salesforce.com/s/articleView?id=sf.remoteaccess_oauth_flows.htm&type=5) " +
+  "for connected apps.";
+
+export const SCHEMA_COMMENT =
+  "Salesforce functions: a credential-free ID toolkit, typed SOQL scans with pushdown, per-id lookups and incremental sync.";
 
 export const SCHEMA_DOC_LLM =
-  "main holds the functions: the credential-free ID toolkit (id18, id15, key_prefix, object_of, is_valid_id, " +
-  "soql_literal), the scans soql(query) and query_object(object_name, …), the per-row lookups lookup / record / " +
-  "picklist_values, describe_fields(object_name), and updated_ids / deleted_ids for incremental sync. Scans need a " +
-  "salesforce secret; filters on query_object columns are pushed into SOQL WHERE.";
+  "Schema main holds the worker's functions. The ID toolkit is scalar and needs no secret: it normalises, validates and " +
+  "classifies Salesforce ids in exported files, and is the join fix for 15- versus 18-character ids. Everything else " +
+  "needs a salesforce secret. The scans take SOQL or an object name and return describe-typed rows; filters on their " +
+  "columns, the projected columns and Top-N limits become SOQL, and above bulk_threshold rows the read switches to a " +
+  "Bulk API 2.0 job. The per-id functions are LATERAL-friendly and batch 200 ids per API call. The incremental helpers " +
+  "return changed and deleted ids for a time window and refuse windows older than Salesforce's retention.";
 
 export const SCHEMA_DOC_MD =
   "## main\n\n" +
-  "The functions. The ID toolkit works on any id column with no secret and no network — the place to start " +
-  "with a downloaded report.\n\n" +
-  "The scans (`soql`, `query_object`) read records with typed columns, and push DuckDB filters, projections and " +
-  "Top-N limits into SOQL; above `bulk_threshold` rows they switch to Bulk API 2.0. The per-row lookups are " +
-  "LATERAL-friendly and batch 200 ids per API call. `updated_ids` / `deleted_ids` make incremental loads " +
-  "delete-aware within Salesforce's retention windows.";
+  "Start here with a downloaded report: the ID toolkit works on any id column with no secret and no network, and " +
+  "fixes the classic join where one system exports 15-character ids and another 18.\n\n" +
+  "With a `salesforce` secret, the scans read records with columns typed from the org's describe metadata and push " +
+  "DuckDB filters, projections and Top-N limits into SOQL, so a six-column query against a 900-field object fetches " +
+  "six fields; above `bulk_threshold` rows they switch to Bulk API 2.0. The per-row lookups are LATERAL-friendly and " +
+  "batch 200 ids per API call. The incremental helpers make loads delete-aware within Salesforce's retention windows.";
+
+export const META_COMMENT =
+  "Org metadata and operations: describe information, users and access, API limits and Bulk API 2.0 jobs.";
 
 export const META_DOC_LLM =
-  "meta holds org metadata tables (all need a salesforce secret): objects (describeGlobal), columns and picklist_values " +
-  "(for the ATTACH OBJECTS list), record_types, users, profiles, permission_sets, limits (/limits, check DailyApiRequests " +
-  "before big extracts), jobs (Bulk API 2.0 jobs + this worker's resume journal) and organizations.";
+  "Schema meta exposes a Salesforce org's metadata as tables, all behind the salesforce secret. Use it to discover which " +
+  "objects exist before re-attaching with OBJECTS, to map Salesforce field names to the worker's snake_case column names, " +
+  "to audit who has which access, and to check the remaining daily API allowance before a large extract. Describe-based " +
+  "tables cover the objects in the ATTACH OBJECTS list. The Bulk job table merges the org's Bulk API 2.0 query jobs " +
+  "with this worker's resume journal.";
 
 export const SOBJECTS_DOC_LLM =
   "sobjects has one view per object named in the ATTACH OBJECTS option (e.g. OBJECTS 'Account,Opportunity,Invoice__c'). " +
@@ -121,10 +136,10 @@ export const SOBJECTS_DOC_MD =
 
 export const META_DOC_MD =
   "## meta\n\n" +
-  "Org metadata as tables, all behind the `salesforce` secret: the object list, the column-name mapping and " +
-  "picklists of the attached objects, record types, users, profiles, permission sets and the org itself.\n\n" +
-  "Operational tables sit alongside: the org's API limits (check the daily request allowance before a large " +
-  "extract) and the Bulk API 2.0 jobs with this worker's resume journal.";
+  "Org metadata as tables, all behind the `salesforce` secret: what the org contains, how its fields map to column " +
+  "names, and who can see what.\n\n" +
+  "Operational tables sit alongside: check the daily API request allowance before a large extract (scans also stop " +
+  "on their own at `quota_guard_pct`), and inspect Bulk API 2.0 jobs together with this worker's resume journal.";
 
 export const AGENT_TEST_TASKS = [
   {

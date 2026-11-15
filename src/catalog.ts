@@ -33,10 +33,11 @@ import {
   CATALOG_NAME,
   CATALOG_TAGS,
   keywordsArray,
+  META_COMMENT,
   META_DOC_LLM,
   META_DOC_MD,
   SCHEMA_CATEGORIES,
-  SCHEMA_DOC_MD,
+  SCHEMA_COMMENT,
   SCHEMA_TAGS,
   SOBJECTS_DOC_LLM,
   SOBJECTS_DOC_MD,
@@ -115,14 +116,13 @@ export const CATALOG: CatalogDescriptor = {
   schemas: [
     {
       path: ["main"],
-      comment: SCHEMA_DOC_MD,
+      comment: SCHEMA_COMMENT,
       functions: FUNCTIONS,
       tags: { ...SCHEMA_TAGS, "vgi.example_queries": JSON.stringify(FN_EXAMPLES.slice(0, 12)) },
     },
     {
       path: ["meta"],
-      comment:
-        "Org metadata: objects, columns, picklists, record types, users, profiles, permission sets, limits, Bulk jobs, org.",
+      comment: META_COMMENT,
       tables: META_TABLES,
       tags: {
         "vgi.title": "Salesforce Metadata",
