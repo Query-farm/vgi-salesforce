@@ -27,6 +27,7 @@ import { type ColumnSpec, kindOf } from "../sf/types.ts";
 import { docTags, Q, specSchema } from "./common.ts";
 
 const API_CHOICES = ["auto", "rest", "bulk"];
+const BULK_PAGE_DOC = "Records per Bulk API 2.0 results page (maxRecords); each page is one Sforce-Locator step.";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
@@ -84,6 +85,7 @@ async function runScan(
 // ------------------------------------------------------------------- query_object
 
 interface QueryObjectArgs {
+  bulk_page_size: bigint;
   object_name: string;
   fields: string[] | null;
   where_clause: string | null;
@@ -127,6 +129,7 @@ export const queryObject: VgiFunction = defineTableFunction<QueryObjectArgs, Sca
     api: utf8(),
     include_deleted: bool,
     bulk_threshold: int64(),
+    bulk_page_size: int64(),
     resume: bool,
   } as never,
   argDefaults: {
@@ -139,6 +142,7 @@ export const queryObject: VgiFunction = defineTableFunction<QueryObjectArgs, Sca
     api: "auto",
     include_deleted: false,
     bulk_threshold: 10000,
+    bulk_page_size: 50000,
     resume: false,
   },
   argDocs: {
@@ -154,11 +158,13 @@ export const queryObject: VgiFunction = defineTableFunction<QueryObjectArgs, Sca
     api: "'auto' (REST, switching to Bulk API 2.0 above bulk_threshold rows), 'rest' or 'bulk'.",
     include_deleted: "Include soft-deleted and archived rows (queryAll / Bulk queryAll).",
     bulk_threshold: "In api 'auto', the totalSize above which the scan moves to a Bulk API 2.0 job.",
+    bulk_page_size: BULK_PAGE_DOC,
     resume: "Continue an unfinished journalled scan of the same query from its saved Bulk job + locator.",
   },
   argConstraints: {
     api: { choices: API_CHOICES },
     bulk_threshold: { ge: 0 },
+    bulk_page_size: { ge: 1, le: 1000000 },
     max_rows: { ge: 0 },
   } as never,
   requiredSecrets: [SECRET_TYPE],
@@ -228,7 +234,7 @@ export const queryObject: VgiFunction = defineTableFunction<QueryObjectArgs, Sca
       countOnly: false,
       resumeQuery: resumable ? (since) => build([`SystemModstamp >= ${since}`]) : null,
       bulkThreshold: Number(a.bulk_threshold ?? 10000),
-      bulkPageSize: 50_000,
+      bulkPageSize: Number(a.bulk_page_size ?? 50000),
       stateDir: ctx.stateDir,
       resume: !!a.resume,
     };
@@ -272,6 +278,7 @@ export const queryObject: VgiFunction = defineTableFunction<QueryObjectArgs, Sca
 // --------------------------------------------------------------------------- soql
 
 interface SoqlArgs {
+  bulk_page_size: bigint;
   query: string;
   api: string;
   include_deleted: boolean;
@@ -428,8 +435,15 @@ export const soql: VgiFunction = defineTableFunction<SoqlArgs, ScanState>({
   name: "soql",
   description:
     "Run a SOQL query; the result is typed at bind time from the select list and the org's describe metadata",
-  args: { query: utf8(), api: utf8(), include_deleted: bool, bulk_threshold: int64(), resume: bool } as never,
-  argDefaults: { api: "auto", include_deleted: false, bulk_threshold: 10000, resume: false },
+  args: {
+    query: utf8(),
+    api: utf8(),
+    include_deleted: bool,
+    bulk_threshold: int64(),
+    bulk_page_size: int64(),
+    resume: bool,
+  } as never,
+  argDefaults: { api: "auto", include_deleted: false, bulk_threshold: 10000, bulk_page_size: 50000, resume: false },
   argDocs: {
     query:
       "A SOQL query. Select items: fields, parent paths (Account.Owner.Name), COUNT(), COUNT/COUNT_DISTINCT/SUM/AVG/MIN/MAX(f), " +
@@ -437,9 +451,14 @@ export const soql: VgiFunction = defineTableFunction<SoqlArgs, ScanState>({
     api: "'auto' (REST, switching to Bulk API 2.0 above bulk_threshold rows), 'rest' or 'bulk'. Aggregates are REST-only.",
     include_deleted: "Include soft-deleted and archived rows (queryAll).",
     bulk_threshold: "In api 'auto', the totalSize above which the scan moves to a Bulk API 2.0 job.",
+    bulk_page_size: BULK_PAGE_DOC,
     resume: "Continue an unfinished journalled scan of the same query from its saved Bulk job + locator.",
   },
-  argConstraints: { api: { choices: API_CHOICES }, bulk_threshold: { ge: 0 } } as never,
+  argConstraints: {
+    api: { choices: API_CHOICES },
+    bulk_threshold: { ge: 0 },
+    bulk_page_size: { ge: 1, le: 1000000 },
+  } as never,
   requiredSecrets: [SECRET_TYPE],
   onBind: async (params) => {
     const ctx = callContext(params.secrets, params.bindCall.attach_opaque_data);
@@ -465,7 +484,7 @@ export const soql: VgiFunction = defineTableFunction<SoqlArgs, ScanState>({
       countOnly: !!bind.countOnly,
       resumeQuery: bind.resumable ? (since) => withCondition(bind, `SystemModstamp >= ${since}`) : null,
       bulkThreshold: Number(a.bulk_threshold ?? 10000),
-      bulkPageSize: 50_000,
+      bulkPageSize: Number(a.bulk_page_size ?? 50000),
       stateDir: ctx.stateDir,
       resume: !!a.resume,
     };

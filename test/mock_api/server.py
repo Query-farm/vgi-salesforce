@@ -18,8 +18,9 @@ worker uses, against the fixture org in fixtures.py:
 Every data response carries `Sforce-Limit-Info: api-usage=N/M`. Test hooks:
   GET  /__requests        JSON request log ({method, path, q, body})
   GET  /__reset           clear the log, jobs, cursors and config (GET so SQL tests can call it)
-  GET  /__config?k=<json> or POST JSON: rest_page_size, api_used, api_max, expire_job_after_pages,
-                          expire_cursor_after_pages, fail_once {path, status, code},
+  GET  /__config?k=<json> or POST JSON: rest_page_size, api_used, api_max, expire_job_after_pages
+                          and expire_cursor_after_pages (one-shot), fail_once {path, status, code, skip},
+                          drop_jobs (delete every Bulk job),
                           daily_limit_exhausted, synthetic_objects, wide_fields
 
 Run: python server.py [--port N]  (prints PORT:<n> once listening)
@@ -271,6 +272,8 @@ class Handler(BaseHTTPRequestHandler):
                 r = dict(fixtures.RECORDS)
                 r.update(records)
                 STATE["org"] = Org(d, r)
+            if cfg.get("drop_jobs"):
+                STATE["jobs"].clear()
             for k in ("rest_page_size", "api_used", "api_max", "expire_job_after_pages", "expire_cursor_after_pages",
                       "fail_once", "daily_limit_exhausted"):
                 if k in cfg:
@@ -285,17 +288,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/services/oauth2/token":
             STATE["log"].append({**entry, "body": None, "grant_type": parse_qs(raw).get("grant_type", [None])[0]})
             return self.token(parse_qs(raw))
-        STATE["log"].append(entry)
-
         if not path.startswith("/services/data/v"):
             return self.err(404, "NOT_FOUND", "The requested resource does not exist")
         auth = self.headers.get("Authorization", "")
         if not auth.startswith("Bearer ") or auth[7:] not in STATE["tokens"]:
+            STATE["unauthorized"] = STATE.get("unauthorized", 0) + 1
             return self.err(401, "INVALID_SESSION_ID", "Session expired or invalid")
+        # Only authenticated requests are logged: a 401 that is retried after re-auth would
+        # otherwise show up as a duplicate call.
+        STATE["log"].append(entry)
         if STATE["daily_limit_exhausted"]:
             return self.err(403, "REQUEST_LIMIT_EXCEEDED", "TotalRequests Limit exceeded.")
         fo = STATE["fail_once"]
-        if fo and fo.get("path") in path:
+        if fo and fo.get("path") in path and fo.get("skip", 0) > 0:
+            fo["skip"] -= 1
+        elif fo and fo.get("path") in path:
             STATE["fail_once"] = None
             hdr = {"Retry-After": "1"} if fo.get("status") in (429, 503) else {}
             return self.err(fo.get("status", 503), fo.get("code", "SERVER_UNAVAILABLE"), "injected failure", hdr)
@@ -388,6 +395,7 @@ class Handler(BaseHTTPRequestHandler):
             exp = STATE["expire_cursor_after_pages"]
             if cur is None or (exp is not None and cur["pages"] >= exp):
                 STATE["cursors"].pop(cur_id, None)
+                STATE["expire_cursor_after_pages"] = None  # one-shot
                 return self.err(400, "INVALID_QUERY_LOCATOR", "invalid query locator")
             cur["pages"] += 1
             return self.page(cur["records"], cur["total"], int(off), cur_id, H)
@@ -474,8 +482,9 @@ class Handler(BaseHTTPRequestHandler):
             job["pages"] += 1
             exp = STATE["expire_job_after_pages"]
             if exp is not None and job["pages"] >= exp and locator != "null":
-                # The job "expires" (is deleted) right after serving this page.
+                # The job "expires" (is deleted) right after serving this page. One-shot.
                 del STATE["jobs"][jid]
+                STATE["expire_job_after_pages"] = None
             text = render_csv(job["query"], chunk)
             return self.send(200, text, {**H, "Sforce-Locator": locator, "Sforce-NumberOfRecords": str(len(chunk))}, "text/csv")
         return self.err(404, "NOT_FOUND", "The requested resource does not exist", H)

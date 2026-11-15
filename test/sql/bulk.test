@@ -1,0 +1,229 @@
+# name: test/sql/bulk.test
+# description: Bulk API 2.0 lifecycle, Sforce-Locator paging, auto REST→Bulk switching, locator/job expiry recovery with tied SystemModstamps, the scan journal and resume
+# group: [salesforce]
+
+require vgi
+
+require-env SALESFORCE_WORKER
+
+require-env SALESFORCE_FIXTURE_URL
+
+require-env SALESFORCE_TEST_PRIVATE_KEY
+
+require-env SALESFORCE_STATE_DIR
+
+statement ok
+LOAD httpfs;
+
+statement ok
+LOAD json;
+
+statement ok
+ATTACH 'salesforce' (TYPE vgi, LOCATION '{SALESFORCE_WORKER}', OBJECTS 'Account,Invoice__c', STATE_DIR '{SALESFORCE_STATE_DIR}/bulk');
+
+statement ok
+CREATE SECRET sf (TYPE salesforce, INSTANCE_URL '{SALESFORCE_FIXTURE_URL}', LOGIN_URL '{SALESFORCE_FIXTURE_URL}', CLIENT_ID '3MVG9fixture.consumer.key', USERNAME 'integration@acme.example', PRIVATE_KEY '{SALESFORCE_TEST_PRIVATE_KEY}');
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=b1');
+
+# ---------------------------------------------------------------- lifecycle + locator paging
+# submit (UploadComplete) → poll (InProgress) → poll (JobComplete) → 3 result pages of 2-3 rows.
+
+query ITTR
+SELECT count(*), min(name), max(name), sum(amount) FROM salesforce.main.query_object('Opportunity', api := 'bulk', bulk_page_size := 3);
+----
+8	Acme Platform	umbrella grid	844001.49
+
+query TI
+SELECT method, count(*) FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=b1') WHERE path LIKE '%/jobs/query%' GROUP BY method ORDER BY method;
+----
+GET	5
+POST	1
+
+query I
+SELECT count(*) FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=b1') WHERE path LIKE '%/results' AND qs LIKE '%locator=%';
+----
+2
+
+# Compound fields are not supported by Bulk queries: the worker selects their components and
+# rebuilds the STRUCT; base64 fields are never selected. Values arrive as CSV and are typed.
+query TTTTT
+SELECT name, billing_address.city, regions::VARCHAR, acme_score, created_date FROM salesforce.sobjects.Account WHERE name = 'Acme Corp' AND billing_address IS NOT NULL;
+----
+Acme Corp	San Francisco	[AMER, EMEA]	92.5	2025-06-01 12:00:00+00
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=b2');
+
+query TTTTT
+SELECT name, amount, issued_on, paid, replace(notes, chr(10), '|') FROM salesforce.main.query_object('Invoice__c', api := 'bulk') WHERE name IN ('INV-0001', 'INV-0002', 'INV-0003') ORDER BY name;
+----
+INV-0001	1000.00	2025-12-01	true	Net 30|Thanks!
+INV-0002	2500.50	2025-12-02	false	Quote "rush", please
+INV-0003	99.99	NULL	false	NULL
+
+query T
+SELECT DISTINCT body->>'operation' FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=b2') WHERE method = 'POST' AND path LIKE '%/jobs/query';
+----
+query
+
+# include_deleted → a queryAll job.
+query I
+SELECT count(*) FROM salesforce.main.query_object('Invoice__c', api := 'bulk', include_deleted := true);
+----
+7
+
+# ---------------------------------------------------------------- auto: REST first, Bulk above the threshold
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=b3');
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?rest_page_size=2');
+
+query I
+SELECT count(*) FROM salesforce.main.query_object('Opportunity', bulk_threshold := 5);
+----
+8
+
+query II
+SELECT count(*) FILTER (WHERE q IS NOT NULL), count(*) FILTER (WHERE method = 'POST' AND path LIKE '%/jobs/query') FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=b3');
+----
+1	1
+
+# Under the threshold it stays on REST (and pages with nextRecordsUrl).
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=b4');
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?rest_page_size=2');
+
+query I
+SELECT count(*) FROM salesforce.main.query_object('Opportunity');
+----
+8
+
+query II
+SELECT count(*) FILTER (WHERE path LIKE '%/query/01g%'), count(*) FILTER (WHERE path LIKE '%/jobs/%') FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=b4');
+----
+3	0
+
+# ---------------------------------------------------------------- expiry: job vanishes mid-scan
+# Invoices in SystemModstamp order: INV-0001 (01-03), INV-0002/3/4 (01-05, tied), INV-0005/6
+# (01-07, tied). With 2 rows per page the job expires after page 1 (INV-0001, INV-0002), in the
+# middle of the 01-05 tie. The scan re-submits with SystemModstamp >= 2026-01-05T09:00:00Z and
+# drops INV-0002 (already emitted at that instant): every row exactly once.
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=b5');
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?expire_job_after_pages=1');
+
+query IIT
+SELECT count(*), count(DISTINCT id), string_agg(name, ',' ORDER BY name) FROM salesforce.main.query_object('Invoice__c', fields := ['Id', 'Name', 'SystemModstamp'], api := 'bulk', bulk_page_size := 2);
+----
+6	6	INV-0001,INV-0002,INV-0003,INV-0004,INV-0005,INV-0006
+
+query T
+SELECT body->>'query' FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=b5') WHERE method = 'POST' AND path LIKE '%/jobs/query' ORDER BY body->>'query';
+----
+SELECT Id, Name, SystemModstamp FROM Invoice__c ORDER BY SystemModstamp ASC, Id ASC
+SELECT Id, Name, SystemModstamp FROM Invoice__c WHERE SystemModstamp >= 2026-01-05T09:00:00Z ORDER BY SystemModstamp ASC, Id ASC
+
+# The same over REST: the nextRecordsUrl cursor expires (INVALID_QUERY_LOCATOR) after the
+# second page, mid-tie; the re-query skips INV-0002/3/4.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=b6');
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?rest_page_size=2&expire_cursor_after_pages=1');
+
+query IIT
+SELECT count(*), count(DISTINCT id), string_agg(name, ',' ORDER BY name) FROM salesforce.main.query_object('Invoice__c', fields := ['Id', 'Name', 'SystemModstamp'], api := 'rest');
+----
+6	6	INV-0001,INV-0002,INV-0003,INV-0004,INV-0005,INV-0006
+
+query I
+SELECT count(*) FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=b6') WHERE q LIKE '%SystemModstamp >= 2026-01-05T09:00:00Z%';
+----
+1
+
+# A soql() query without SystemModstamp order is not resumable: a clear error, never a silent re-read.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?expire_job_after_pages=1');
+
+statement error
+SELECT count(*) FROM salesforce.main.soql('SELECT Id, Name FROM Invoice__c', api := 'bulk', bulk_page_size := 2);
+----
+<REGEX>:.*expired, and this query is not resumable.*nothing was re-read silently.*
+
+# soql() that selects Id + SystemModstamp and orders by SystemModstamp is resumable.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?expire_job_after_pages=1');
+
+query II
+SELECT count(*), count(DISTINCT id) FROM salesforce.main.soql('SELECT Id, Name, SystemModstamp FROM Invoice__c WHERE Paid__c = FALSE ORDER BY SystemModstamp, Id', api := 'bulk', bulk_page_size := 2);
+----
+4	4
+
+# ---------------------------------------------------------------- journal, meta.jobs and resume := true
+# Page 2 of the job fails with a non-retryable error: the scan dies with page 1 emitted and the
+# journal holding the job id and the locator of page 2.
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=b7');
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?fail_once=%7B%22path%22%3A%22%2Fresults%22%2C%22status%22%3A400%2C%22code%22%3A%22INVALIDJOBSTATE%22%2C%22skip%22%3A1%7D');
+
+statement error
+SELECT count(*), string_agg(name, ',' ORDER BY name) FROM salesforce.main.query_object('Invoice__c', fields := ['Id', 'Name', 'SystemModstamp'], api := 'bulk', bulk_page_size := 2);
+----
+<REGEX>:.*HTTP 400.*INVALIDJOBSTATE.*
+
+query TTITT
+SELECT object_name, state, records_read, journal_state, locator IS NOT NULL FROM salesforce.meta.jobs WHERE journal_state IS NOT NULL;
+----
+Invoice__c	JobComplete	2	failed	true
+
+# resume := true on the same query (same columns, so the same SOQL and journal key) continues
+# from the saved locator: only the 4 unread rows, and no new job.
+query IT
+SELECT count(*), string_agg(name, ',' ORDER BY name) FROM salesforce.main.query_object('Invoice__c', fields := ['Id', 'Name', 'SystemModstamp'], api := 'bulk', bulk_page_size := 2, resume := true);
+----
+4	INV-0003,INV-0004,INV-0005,INV-0006
+
+query I
+SELECT count(*) FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=b7') WHERE method = 'POST' AND path LIKE '%/jobs/query';
+----
+1
+
+query T
+SELECT journal_state FROM salesforce.meta.jobs WHERE journal_state IS NOT NULL;
+----
+complete
+
+# A completed journal entry is not resumed: the next resume := true scan starts over.
+query IT
+SELECT count(*), string_agg(name, ',' ORDER BY name) FROM salesforce.main.query_object('Invoice__c', fields := ['Id', 'Name', 'SystemModstamp'], api := 'bulk', bulk_page_size := 2, resume := true);
+----
+6	INV-0001,INV-0002,INV-0003,INV-0004,INV-0005,INV-0006
+
+# Resume after the job itself vanished (results are kept 7 days): recovered by SystemModstamp + Id ring.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?fail_once=%7B%22path%22%3A%22%2Fresults%22%2C%22status%22%3A400%2C%22code%22%3A%22INVALIDJOBSTATE%22%2C%22skip%22%3A1%7D');
+
+statement error
+SELECT count(*), string_agg(name, ',' ORDER BY name) FROM salesforce.main.query_object('Invoice__c', fields := ['Id', 'Name', 'SystemModstamp'], api := 'bulk', bulk_page_size := 2);
+----
+<REGEX>:.*INVALIDJOBSTATE.*
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?drop_jobs=true');
+
+query IT
+SELECT count(*), string_agg(name, ',' ORDER BY name) FROM salesforce.main.query_object('Invoice__c', fields := ['Id', 'Name', 'SystemModstamp'], api := 'bulk', bulk_page_size := 2, resume := true);
+----
+4	INV-0003,INV-0004,INV-0005,INV-0006

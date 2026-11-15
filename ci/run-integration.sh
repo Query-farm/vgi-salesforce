@@ -75,6 +75,9 @@ start_server() {
 # points its `salesforce` secret at (INSTANCE_URL / LOGIN_URL).
 start_server "$STAGE/mock.log" $PYTHON "$REPO/test/mock_api/server.py"
 export SALESFORCE_FIXTURE_URL="http://127.0.0.1:$PORT"
+# The same server under another host name: limits.test uses it so its API-usage readings
+# (tracked per instance URL) stay separate from the other tests in a long-lived HTTP worker.
+export SALESFORCE_FIXTURE_URL_LOCALHOST="http://localhost:$PORT"
 # The connected-app test key (fixture only), as one line with \n escapes for CREATE SECRET.
 SALESFORCE_TEST_PRIVATE_KEY="$(awk '{printf "%s\\n", $0}' "$REPO/test/fixtures/connected-app.key")"
 export SALESFORCE_TEST_PRIVATE_KEY

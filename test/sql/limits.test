@@ -1,0 +1,92 @@
+# name: test/sql/limits.test
+# description: API quota guard (Sforce-Limit-Info), the daily REQUEST_LIMIT_EXCEEDED, 503/429 retries and meta.limits
+# group: [salesforce]
+
+require vgi
+
+require-env SALESFORCE_WORKER
+
+require-env SALESFORCE_FIXTURE_URL_LOCALHOST
+
+statement ok
+LOAD httpfs;
+
+statement ok
+LOAD json;
+
+statement ok
+ATTACH 'salesforce' AS sf80 (TYPE vgi, LOCATION '{SALESFORCE_WORKER}');
+
+statement ok
+ATTACH 'salesforce' AS sf95 (TYPE vgi, LOCATION '{SALESFORCE_WORKER}', QUOTA_GUARD_PCT 95);
+
+statement error
+ATTACH 'salesforce' AS sf_bad (TYPE vgi, LOCATION '{SALESFORCE_WORKER}', QUOTA_GUARD_PCT 0);
+----
+<REGEX>:.*quota_guard_pct must be 1-100.*
+
+# A pre-issued access token (the static fixture session) against the localhost host name, so
+# these usage readings stay separate from the other test files.
+statement ok
+CREATE SECRET sf_tok (TYPE salesforce, INSTANCE_URL '{SALESFORCE_FIXTURE_URL_LOCALHOST}', ACCESS_TOKEN '00Dfixture!static.access.token');
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL_LOCALHOST}/__reset?t=l1');
+
+# 503 with Retry-After is retried; the query succeeds.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL_LOCALHOST}/__config?fail_once=%7B%22path%22%3A%22%2Fquery%22%2C%22status%22%3A503%7D');
+
+query I
+SELECT count(*) FROM sf80.main.soql('SELECT Id FROM Lead');
+----
+3
+
+# 429 likewise.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL_LOCALHOST}/__config?fail_once=%7B%22path%22%3A%22%2Fquery%22%2C%22status%22%3A429%2C%22code%22%3A%22REQUEST_LIMIT_EXCEEDED%22%7D');
+
+query I
+SELECT count(*) FROM sf80.main.soql('SELECT Id FROM Case');
+----
+4
+
+# meta.limits reports the org allowance and the Sforce-Limit-Info reading.
+query TT
+SELECT limit_name, used_pct < 5 FROM sf80.meta.limits WHERE limit_name IN ('DailyApiRequests', 'SforceLimitInfoApiUsage') ORDER BY limit_name;
+----
+DailyApiRequests	true
+SforceLimitInfoApiUsage	true
+
+# Usage at 85% of the daily allowance: the next call records it, and the one after that fails
+# loudly at the default quota_guard_pct 80 — before spending a request.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL_LOCALHOST}/__config?api_used=12750&api_max=15000');
+
+query I
+SELECT count(*) FROM sf80.main.soql('SELECT Id FROM Lead');
+----
+3
+
+statement error
+SELECT count(*) FROM sf80.main.soql('SELECT Id FROM Lead');
+----
+<REGEX>:.*quota guard: the org has used 12751 of 15000 daily API requests \(85\.0%\), at or above quota_guard_pct 80.*
+
+# The same org through an attach with QUOTA_GUARD_PCT 95 is allowed to continue.
+query I
+SELECT count(*) FROM sf95.main.soql('SELECT Id FROM Lead');
+----
+3
+
+# The org's daily limit is exhausted: REQUEST_LIMIT_EXCEEDED is never retried.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL_LOCALHOST}/__config?daily_limit_exhausted=true&api_used=100');
+
+statement error
+SELECT count(*) FROM sf95.main.soql('SELECT Id FROM Case');
+----
+<REGEX>:.*HTTP 403: REQUEST_LIMIT_EXCEEDED.*never retried.*
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL_LOCALHOST}/__reset?t=l2');

@@ -142,7 +142,22 @@ describe("closed SOQL grammar", () => {
     expect(() => parseSoql("SELECT COUNT(), Id FROM Account")).toThrow(/only/);
   });
   test("fuzz: malformed SOQL never throws anything but a grammar error", () => {
-    const parts = ["SELECT", "FROM", "Id", ",", "(", ")", "'", "WHERE", "Account", "COUNT", "x.y", " ", "ORDER BY", "\\"];
+    const parts = [
+      "SELECT",
+      "FROM",
+      "Id",
+      ",",
+      "(",
+      ")",
+      "'",
+      "WHERE",
+      "Account",
+      "COUNT",
+      "x.y",
+      " ",
+      "ORDER BY",
+      "\\",
+    ];
     let x = 7;
     for (let n = 0; n < 3000; n++) {
       let q = "";
@@ -165,15 +180,21 @@ describe("closed SOQL grammar", () => {
   test("resume condition is injected into the WHERE clause", () => {
     const soql = "SELECT Id, SystemModstamp FROM Account WHERE Name = 'x' ORDER BY SystemModstamp";
     const rest = "WHERE Name = 'x' ORDER BY SystemModstamp";
-    const bind = { object: "Account", columns: [], soql, clauses: findClauses(rest), restStart: soql.length - rest.length };
+    const bind = {
+      object: "Account",
+      columns: [],
+      soql,
+      clauses: findClauses(rest),
+      restStart: soql.length - rest.length,
+    };
     expect(withCondition(bind, "SystemModstamp >= 2026-01-01T00:00:00Z")).toBe(
       "SELECT Id, SystemModstamp FROM Account WHERE (SystemModstamp >= 2026-01-01T00:00:00Z) AND (Name = 'x') ORDER BY SystemModstamp",
     );
   });
   test("object soql builder", () => {
-    expect(buildObjectSoql({ object: "Account", select: ["Id", "Name"], conditions: ["A = 1"], orderBy: "Name", limit: 5 })).toBe(
-      "SELECT Id, Name FROM Account WHERE A = 1 ORDER BY Name LIMIT 5",
-    );
+    expect(
+      buildObjectSoql({ object: "Account", select: ["Id", "Name"], conditions: ["A = 1"], orderBy: "Name", limit: 5 }),
+    ).toBe("SELECT Id, Name FROM Account WHERE A = 1 ORDER BY Name LIMIT 5");
   });
 });
 
@@ -192,7 +213,13 @@ describe("config, csv, limits", () => {
   test("JWT assertion claims", async () => {
     const pem = await Bun.file(`${import.meta.dir}/../test/fixtures/connected-app.key`).text();
     const cfg = configFromSecrets({
-      s: { type: "salesforce", instance_url: "https://x.my.salesforce.com", client_id: "cid", username: "u@x", private_key: pem },
+      s: {
+        type: "salesforce",
+        instance_url: "https://x.my.salesforce.com",
+        client_id: "cid",
+        username: "u@x",
+        private_key: pem,
+      },
     });
     const [h, c] = jwtAssertion(cfg, 1000).split(".");
     expect(JSON.parse(Buffer.from(h as string, "base64url").toString())).toEqual({ alg: "RS256", typ: "JWT" });
@@ -208,7 +235,11 @@ describe("config, csv, limits", () => {
     expect(parseLimitInfo(null)).toBeNull();
   });
   test("CSV with quotes, commas and newlines", () => {
-    expect(parseCsv('"Id","Notes"\na,"x, ""y""\nz"\nb,\n')).toEqual([["Id", "Notes"], ["a", 'x, "y"\nz'], ["b", ""]]);
+    expect(parseCsv('"Id","Notes"\na,"x, ""y""\nz"\nb,\n')).toEqual([
+      ["Id", "Notes"],
+      ["a", 'x, "y"\nz'],
+      ["b", ""],
+    ]);
   });
   test("OBJECTS list", () => {
     expect(parseObjectList(" Account, Invoice__c ,account")).toEqual(["Account", "Invoice__c"]);
