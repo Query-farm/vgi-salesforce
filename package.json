@@ -2,7 +2,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A VGI worker for DuckDB, generated from the Query.Farm VGI starter template.",
+  "description": "Salesforce CRM as SQL in DuckDB: SOQL pushdown, Bulk API 2.0 with resumable locators, describe-typed objects and a credential-free ID toolkit.",
   "license": "0BSD",
   "scripts": {
     "typecheck": "tsc --noEmit",
