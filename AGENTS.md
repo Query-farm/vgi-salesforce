@@ -25,15 +25,18 @@ src/
   worker.ts        # entry point: serves the catalog over stdio, --unix or --http
   catalog.ts       # assembles the catalog; add new functions to FUNCTIONS
   meta.ts          # catalog/schema metadata + helpers (objectTags, column)
-  greet.ts         # scalar example (overloads, const param with choices)
-  sequence.ts      # table function example (named args, streaming state)
-  fetch_items.ts   # REST API table function (pagination, retries, secrets)
+  secret.ts        # the `salesforce` secret type
+  sf/              # client (OAuth, quota guard), describe, types, naming, pushdown,
+                   # closed SOQL grammar, REST/Bulk scan engine, journal, ID toolkit
+  functions/       # the SQL functions and meta tables
   cli.ts           # flag parsing: stdio / --unix / --http (PORT:<n>, /health)
   log.ts           # stderr logger
 bin/               # vgi-salesforce-worker (what DuckDB launches) and run-recipe
+scripts/schema_spike.py  # the Gate 0 scale spike against a synthetic org
 tests/             # bun unit tests (worker subprocess + mock API)
 test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
+test/mock_api/     # offline Salesforce REST + Bulk 2.0 replay server (strict SOQL evaluator)
+test/fixtures/     # test-only connected-app key
 examples/          # recipes: pushdown, caching, catalog tables, aggregates, COPY …
 ci/                # integration harness used by `make test-sql` and CI
 scripts/           # vgi_template.py (init / template-diff)
