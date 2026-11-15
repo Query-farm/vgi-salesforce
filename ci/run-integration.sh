@@ -71,13 +71,15 @@ start_server() {
   echo "::error::'$*' never printed PORT:<n>"; cat "$log"; return 1
 }
 
-# The mock APIs fetch_items is tested against. The plain one rate-limits every
-# page once (429 + Retry-After) so the retry path is always exercised.
-unset SALESFORCE_API_TOKEN
-MOCK_API_FLAKY=1 start_server "$STAGE/mock.log" $PYTHON "$REPO/test/mock_api/server.py"
-export SALESFORCE_MOCK_API="http://127.0.0.1:$PORT"
-MOCK_API_TOKEN=test-token start_server "$STAGE/mock-auth.log" $PYTHON "$REPO/test/mock_api/server.py"
-export SALESFORCE_MOCK_API_AUTH="http://127.0.0.1:$PORT"
+# The offline Salesforce replay server (test/mock_api/server.py) every SQL test
+# points its `salesforce` secret at (INSTANCE_URL / LOGIN_URL).
+start_server "$STAGE/mock.log" $PYTHON "$REPO/test/mock_api/server.py"
+export SALESFORCE_FIXTURE_URL="http://127.0.0.1:$PORT"
+# The connected-app test key (fixture only), as one line with \n escapes for CREATE SECRET.
+SALESFORCE_TEST_PRIVATE_KEY="$(awk '{printf "%s\\n", $0}' "$REPO/test/fixtures/connected-app.key")"
+export SALESFORCE_TEST_PRIVATE_KEY
+mkdir -p "$STAGE/state"
+export SALESFORCE_STATE_DIR="$STAGE/state"
 
 HTTP=0
 case "$TRANSPORT" in
@@ -154,7 +156,7 @@ echo "executed $executed of $total test files over $TRANSPORT ($skipped skipped)
 if [ "$executed" -lt "$MIN_EXECUTED" ]; then
   echo "::error::only $executed test files ran (MIN_EXECUTED=$MIN_EXECUTED)"; rc=1
 fi
-if [ "$HTTP" = "1" ] && ! kill -0 "${PIDS[2]}" 2>/dev/null; then
+if [ "$HTTP" = "1" ] && ! kill -0 "${PIDS[1]}" 2>/dev/null; then
   echo "::error::the HTTP worker died during the run:"; cat "$STAGE/worker.log"; rc=1
 fi
 exit "$rc"
