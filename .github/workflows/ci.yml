@@ -95,8 +95,12 @@ jobs:
           location: ${{ github.workspace }}/bin/vgi-salesforce-worker
           # Set in vgi-lint.toml, so local runs and CI agree.
           fail-on: ${{ steps.lintcfg.outputs.fail_on }}
-          # Set to false if your examples need real credentials or network access.
-          execute: true
+          # Every connected function and table (salesforce.main.query_object, soql, lookup,
+          # updated_ids, salesforce.meta.*) needs a `salesforce` secret — a Salesforce org's
+          # INSTANCE_URL plus OAuth (JWT bearer CLIENT_ID + USERNAME + PRIVATE_KEY, client
+          # credentials, or a refresh token) — which CI does not have. The SQL tests cover the
+          # same behaviour offline against the replay server in test/mock_api.
+          execute: "false"
 
   docker:
     name: Docker image smoke test

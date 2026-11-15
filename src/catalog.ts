@@ -34,10 +34,12 @@ import {
   CATALOG_TAGS,
   keywordsArray,
   META_DOC_LLM,
+  META_DOC_MD,
   SCHEMA_CATEGORIES,
   SCHEMA_DOC_MD,
   SCHEMA_TAGS,
   SOBJECTS_DOC_LLM,
+  SOBJECTS_DOC_MD,
   SOURCE_URL,
 } from "./meta.ts";
 import { SALESFORCE_SECRET_TYPE } from "./secret.ts";
@@ -129,8 +131,8 @@ export const CATALOG: CatalogDescriptor = {
           "salesforce, metadata, describe, limits, users, profiles, permission sets, bulk jobs",
         ),
         "vgi.doc_llm": META_DOC_LLM,
-        "vgi.doc_md": "## meta\n\nOrg metadata tables. All need a `salesforce` secret.",
-        "vgi.categories": JSON.stringify(SCHEMA_CATEGORIES),
+        "vgi.doc_md": META_DOC_MD,
+        "vgi.categories": JSON.stringify(SCHEMA_CATEGORIES.filter((c) => c.name === "metadata")),
         "vgi.example_queries": JSON.stringify(META_EXAMPLES.slice(0, 12)),
       },
     },
@@ -142,9 +144,7 @@ export const CATALOG: CatalogDescriptor = {
         domain: "crm",
         "vgi.keywords": keywordsArray("salesforce, sobjects, accounts, opportunities, contacts, custom objects, views"),
         "vgi.doc_llm": SOBJECTS_DOC_LLM,
-        "vgi.doc_md":
-          "## sobjects\n\nOne view per object in `OBJECTS`, e.g. `ATTACH 'salesforce' (TYPE vgi, LOCATION '…', OBJECTS 'Account,Opportunity')`.",
-        "vgi.categories": JSON.stringify(SCHEMA_CATEGORIES),
+        "vgi.doc_md": SOBJECTS_DOC_MD,
         "vgi.example_queries": JSON.stringify([
           {
             description: "Won pipeline by account, from two object views",

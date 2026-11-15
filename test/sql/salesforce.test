@@ -489,7 +489,7 @@ API Only	1
 Sales Ops	2
 
 query TTTT
-SELECT org_id, edition, is_sandbox, api_version FROM salesforce.meta.org;
+SELECT org_id, edition, is_sandbox, api_version FROM salesforce.meta.organizations;
 ----
 00DDn0000000001MAA	Developer Edition	false	64.0
 

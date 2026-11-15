@@ -148,7 +148,7 @@ export const queryObject: VgiFunction = defineTableFunction<QueryObjectArgs, Sca
   argDocs: {
     object_name: "Object API name, e.g. 'Opportunity' or 'Invoice__c'.",
     fields:
-      "Fields or parent paths to return (e.g. ['Id','Name','Account.Name']); NULL returns every field. Columns are named by the mangling rule (see meta.columns).",
+      "Field API names or parent relationship paths to return, such as Account.Name; NULL returns every field. Columns are named by the mangling rule (see meta.columns).",
     where_clause: "Optional raw SOQL condition ANDed into the WHERE clause, e.g. 'IsWon = TRUE'.",
     modified_after: "Only rows with SystemModstamp >= this instant (incremental extracts).",
     modified_before: "Only rows with SystemModstamp < this instant.",
@@ -242,6 +242,7 @@ export const queryObject: VgiFunction = defineTableFunction<QueryObjectArgs, Sca
     await runScan(plan, ctx, state, cols, out, params.outputSchema);
   },
   tags: docTags({
+    dynamicColumns: true,
     title: "Query a Salesforce Object",
     category: "query",
     keywords: "salesforce, soql, sobject, query, crm, records, bulk api, pushdown, incremental, systemmodstamp",
@@ -250,8 +251,8 @@ export const queryObject: VgiFunction = defineTableFunction<QueryObjectArgs, Sca
       "order_by := NULL, max_rows := NULL, api := 'auto', include_deleted := false, bulk_threshold := 10000, resume := false) " +
       "returns the rows of one Salesforce object (Account, Opportunity, Invoice__c …) with one typed column per field, " +
       "named lower snake case (StageName → stage_name, Acme__Score__c → acme_score, Account.Name → account_name). " +
-      "Types come from describe: ids/strings VARCHAR, currency/percent/double DECIMAL(p,s), date DATE, datetime TIMESTAMPTZ, " +
-      "boolean BOOLEAN, multipicklist VARCHAR[], address/geolocation STRUCT. WHERE filters on columns become SOQL WHERE " +
+      "Types come from describe: ids/strings `VARCHAR`, currency/percent/double `DECIMAL(p,s)`, date `DATE`, datetime " +
+      "`TIMESTAMPTZ`, boolean `BOOLEAN`, multipicklist `VARCHAR[]`, address/geolocation `STRUCT`. WHERE filters on columns become SOQL WHERE " +
       "(=, IN, IS NULL, numeric/date/datetime ranges, LIKE prefixes/contains); only the selected columns are fetched; " +
       "modified_after/modified_before bound SystemModstamp for incremental loads. Use the sobjects.<Object> views for the same thing " +
       "as a table. Needs a salesforce secret.",
@@ -491,24 +492,26 @@ export const soql: VgiFunction = defineTableFunction<SoqlArgs, ScanState>({
     await runScan(plan, ctx, state, bind.columns, out, params.outputSchema);
   },
   tags: docTags({
+    dynamicColumns: true,
     title: "Run a SOQL Query",
     category: "query",
     keywords: "salesforce, soql, query, aggregate, group by, relationship, bulk api 2.0, typed",
     docLlm:
-      "soql(query, api := 'auto', include_deleted := false, bulk_threshold := 10000, resume := false) runs SOQL and returns " +
-      "typed columns derived at bind time from the SELECT list and describe metadata. Columns: fields mangled to snake case " +
-      "(Account.Owner.Name → account_owner_name); aggregates by alias (SUM(Amount) total → total) or expr0, expr1 …; " +
-      "COUNT() alone → one row with column count. Supported select items: fields, parent paths up to 5 levels, COUNT(), " +
-      "COUNT/COUNT_DISTINCT/SUM/AVG/MIN/MAX, CALENDAR_/FISCAL_/DAY_ date functions, GROUPING, FIELDS(STANDARD). " +
-      "Subqueries, TYPEOF, toLabel(), convertCurrency() and FIELDS(ALL) are rejected at bind. Use query_object or the " +
-      "sobjects views when you want DuckDB filters pushed down; soql() sends your query as written. Needs a salesforce secret.",
+      "soql(query, api := 'auto', include_deleted := false, bulk_threshold := 10000, bulk_page_size := 50000, " +
+      "resume := false) sends a SOQL query to Salesforce as written and returns typed columns derived at bind time from " +
+      "its field list and describe metadata. Column names: fields are mangled to snake case (Account.Owner.Name " +
+      "becomes account_owner_name); aggregates take their alias, or expr0, expr1 … when unaliased; a bare COUNT() " +
+      "gives one row with a count column. Supported items: fields, parent paths up to 5 levels, COUNT, " +
+      "COUNT_DISTINCT, SUM, AVG, MIN, MAX, the CALENDAR_/FISCAL_/DAY_ date functions, GROUPING and FIELDS(STANDARD). " +
+      "Subqueries, TYPEOF, toLabel, convertCurrency and FIELDS(ALL) are rejected at bind. Prefer query_object or the " +
+      "sobjects views when DuckDB filters should be pushed down. Needs a salesforce secret.",
     docMd:
       "## soql(query, …)\n\nRuns a SOQL query with a typed result. The select list is parsed against a closed grammar " +
       "(fields, parent paths, aggregates, date functions, `FIELDS(STANDARD)`); anything else is a bind error naming the item.",
   }),
   examples: [
     {
-      sql: `SELECT * FROM ${Q}.soql('SELECT StageName, COUNT(Id) deals, SUM(Amount) total FROM Opportunity GROUP BY StageName') ORDER BY total DESC`,
+      sql: `SELECT stage_name, deals, total FROM ${Q}.soql('SELECT StageName, COUNT(Id) deals, SUM(Amount) total FROM Opportunity GROUP BY StageName') WHERE deals > 1 ORDER BY total DESC`,
       description: "Pipeline by stage, aggregated by Salesforce",
     },
     {

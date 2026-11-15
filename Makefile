@@ -4,7 +4,12 @@
 HAYBARN_VERSION ?= 2.0.0rc11
 # vgi-lint is deliberately not pinned: the gate tracks the current quality bar.
 VGI_LINT        := uvx --prerelease=allow --from 'vgi-lint-check>=2,<3' vgi-lint lint
+# Every connected function needs a `salesforce` secret (a Salesforce org + OAuth), and the
+# secret type only exists after ATTACH, so examples cannot execute in the lint run: the
+# static gate is the real gate (CI's vgi-lint-check step uses execute: "false" for the same
+# reason). The SQL tests run the examples' shapes against the replay org instead.
 LINT_ARGS       ?=
+LINT_EXECUTE    ?= --no-execute
 WORKER          := $(CURDIR)/bin/vgi-salesforce-worker
 TOOLS           := $(CURDIR)/.tools
 HAYBARN_UNITTEST := $(TOOLS)/bin/haybarn-unittest
@@ -44,7 +49,7 @@ test-sql-all: ## SQL tests over every transport
 test: test-unit test-sql ## Unit + SQL tests
 
 lint-explain: build ## Metadata quality report (vgi-lint, settings in vgi-lint.toml). LINT_ARGS="--format agent" for agents
-	$(VGI_LINT) "$(WORKER)" $(LINT_ARGS)
+	$(VGI_LINT) "$(WORKER)" $(LINT_EXECUTE) $(LINT_ARGS)
 
 lint-ai: ## Opt-in L3 check: an agent runs vgi-agent-tests.yaml and docs are reviewed (needs the claude CLI)
 	@$(MAKE) --no-print-directory lint-explain LINT_ARGS="--ai $(LINT_ARGS)"

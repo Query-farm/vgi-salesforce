@@ -33,6 +33,7 @@ function windows(args: Args): [bigint, bigint][] {
   const out: [bigint, bigint][] = [];
   for (let s = start; s < end; s += WINDOW_US) {
     const e = s + WINDOW_US;
+    // biome-ignore lint/complexity/useMathMinMax: bigint operands (Math.min takes numbers).
     out.push([s, e > end ? end : e]);
   }
   return out;

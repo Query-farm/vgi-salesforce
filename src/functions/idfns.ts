@@ -4,7 +4,8 @@ import { bool, defineScalarFunction, utf8, type VgiBatch, type VgiFunction } fro
 import { id15, id18, isValidId, keyPrefix, objectOf, soqlLiteral } from "../sf/ids.ts";
 import { docTags, Q } from "./common.ts";
 
-const ID_DOC = "A Salesforce record id, 15 or 18 characters; NULL in, NULL out.";
+const ID_DOC =
+  "A Salesforce record id as text, in its short case-sensitive form or its long case-safe form; NULL in, NULL out.";
 const col = (b: VgiBatch) => (b.getChildAt(0) ?? []) as Iterable<string | null>;
 
 interface Exec {

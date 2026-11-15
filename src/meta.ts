@@ -76,16 +76,14 @@ export const CATALOG_DOC_LLM =
 
 export const CATALOG_DOC_MD =
   "# Salesforce CRM in DuckDB\n\n" +
-  "Query a Salesforce org from SQL. DuckDB predicates and projections become SOQL, large scans run as Bulk API 2.0 jobs " +
-  "with the `Sforce-Locator` as a resumable cursor, and schemas come from the org's own describe metadata.\n\n" +
-  "**Reference notes.** Scans stop at `quota_guard_pct` (ATTACH option, default 80) of the org's daily API allowance, " +
-  "which is shared with its production integrations; check `meta.limits` first. `deleted_ids()` refuses windows " +
-  "older than the recycle-bin retention instead of returning an incomplete delete set.\n\n" +
-  "- **ID toolkit** (`id18`, `id15`, `key_prefix`, `object_of`, `is_valid_id`, `soql_literal`): no secret, no network.\n" +
-  "- **Queries**: `soql()`, `query_object()`, and `sobjects.<Object>` views for the ATTACH `OBJECTS` list.\n" +
-  "- **Lookups**: `lookup()`, `record()`, `picklist_values()` — batched, LATERAL-friendly.\n" +
-  "- **Replication**: `updated_ids()`, `deleted_ids()`.\n" +
-  "- **Metadata**: `meta.objects`, `meta.columns`, `meta.limits`, `meta.jobs`, `meta.org` and more.\n\n" +
+  "Query a Salesforce org from SQL and join it to everything Salesforce reports cannot reach: product usage, " +
+  "billing, support data in local files. DuckDB predicates and projections become SOQL, so a six-column query " +
+  "against a 900-field object fetches six fields; large scans run as Bulk API 2.0 jobs whose `Sforce-Locator` is " +
+  "a resumable cursor; and column types come from the org's own describe metadata.\n\n" +
+  "The ID toolkit needs no org at all: it fixes the 15- versus 18-character id join in any exported CSV.\n\n" +
+  "**Reference notes.** Scans stop at `quota_guard_pct` (ATTACH option, default 80) of the org's daily API " +
+  "allowance, which is shared with its production integrations. Delete-aware incremental helpers refuse windows " +
+  "older than the recycle-bin retention rather than return an incomplete delete set. Everything is read-only.\n\n" +
   `Setup (connected app, certificate, JWT bearer): ${SOURCE_URL}#connect-an-org`;
 
 export const SCHEMA_DOC_LLM =
@@ -95,18 +93,38 @@ export const SCHEMA_DOC_LLM =
   "salesforce secret; filters on query_object columns are pushed into SOQL WHERE.";
 
 export const SCHEMA_DOC_MD =
-  "## main\n\nSalesforce functions: the ID toolkit, SOQL / object scans, per-row lookups, describe and replication helpers.";
+  "## main\n\n" +
+  "The functions. The ID toolkit works on any id column with no secret and no network — the place to start " +
+  "with a downloaded report.\n\n" +
+  "The scans (`soql`, `query_object`) read records with typed columns, and push DuckDB filters, projections and " +
+  "Top-N limits into SOQL; above `bulk_threshold` rows they switch to Bulk API 2.0. The per-row lookups are " +
+  "LATERAL-friendly and batch 200 ids per API call. `updated_ids` / `deleted_ids` make incremental loads " +
+  "delete-aware within Salesforce's retention windows.";
 
 export const META_DOC_LLM =
   "meta holds org metadata tables (all need a salesforce secret): objects (describeGlobal), columns and picklist_values " +
   "(for the ATTACH OBJECTS list), record_types, users, profiles, permission_sets, limits (/limits, check DailyApiRequests " +
-  "before big extracts), jobs (Bulk API 2.0 jobs + this worker's resume journal) and org.";
+  "before big extracts), jobs (Bulk API 2.0 jobs + this worker's resume journal) and organizations.";
 
 export const SOBJECTS_DOC_LLM =
-  "sobjects has one view per object named in the ATTACH OBJECTS option (e.g. OBJECTS 'Account,Opportunity,Invoice__c'): " +
-  "SELECT … FROM salesforce.sobjects.Opportunity WHERE stage_name = 'Closed Won' pushes the filter and the selected " +
-  "columns into SOQL. Each view is query_object('<Object>'); columns are typed from describe (see meta.columns). " +
-  "Without OBJECTS the schema is empty; browse meta.objects, then re-ATTACH with the objects you want.";
+  "sobjects has one view per object named in the ATTACH OBJECTS option (e.g. OBJECTS 'Account,Opportunity,Invoice__c'). " +
+  "Filtering a view, for example on stage_name = 'Closed Won', pushes the filter and the selected columns into SOQL. " +
+  "Each view is query_object('<Object>'); columns are typed from describe (see meta.columns). Without OBJECTS the " +
+  "schema is empty; browse meta.objects, then re-ATTACH with the objects you want.";
+
+export const SOBJECTS_DOC_MD =
+  "## sobjects\n\n" +
+  "One view per object in the ATTACH `OBJECTS` list, e.g. `OBJECTS 'Account,Opportunity,Invoice__c'`. Each view " +
+  "is `query_object('<Object>')`, so filters, projections and Top-N limits are pushed into SOQL.\n\n" +
+  "Views cost nothing at ATTACH: an object's describe is fetched the first time a query binds it and cached for an " +
+  "hour. Without `OBJECTS` the schema is empty — browse `meta.objects`, then re-attach with the objects you want.";
+
+export const META_DOC_MD =
+  "## meta\n\n" +
+  "Org metadata as tables, all behind the `salesforce` secret: the object list, the column-name mapping and " +
+  "picklists of the attached objects, record types, users, profiles, permission sets and the org itself.\n\n" +
+  "Operational tables sit alongside: the org's API limits (check the daily request allowance before a large " +
+  "extract) and the Bulk API 2.0 jobs with this worker's resume journal.";
 
 export const AGENT_TEST_TASKS = [
   {
@@ -121,12 +139,57 @@ export const AGENT_TEST_TASKS = [
   },
   {
     name: "object_of_prefix",
-    prompt: "Using the salesforce worker, which standard Salesforce object does the id 00QDn000001aBcD belong to?",
+    prompt:
+      "Using the salesforce worker, which standard Salesforce object does the id 00QDn000001aBcD belong to, and what is its key prefix and 15-character form?",
+  },
+  {
+    name: "quote_literal",
+    prompt:
+      "Using the salesforce worker, build a SOQL condition LastName = <value> for the last name O'Brien, quoted safely.",
+  },
+  {
+    name: "open_pipeline_by_stage",
+    prompt: "What is the total open (not closed) opportunity amount per stage in the connected Salesforce org?",
+  },
+  {
+    name: "won_deals_soql",
+    prompt: "Using SOQL through the salesforce worker, count the won opportunities and their total amount.",
+  },
+  {
+    name: "task_targets",
+    prompt:
+      "For each Salesforce task whose WhatId is an opportunity, list the task subject with the opportunity's name, and also give the raw record JSON's StageName.",
+  },
+  {
+    name: "stage_picklist",
+    prompt:
+      "List the picklist values of the Opportunity StageName field, both from the per-field function and from the attached objects' metadata table.",
+  },
+  {
+    name: "custom_field_columns",
+    prompt: "What are the custom fields of Invoice__c called as SQL columns, and which of them appear in meta.columns?",
+  },
+  {
+    name: "changes_this_week",
+    prompt: "How many opportunities were updated, and how many deleted, between 2026-01-01 and 2026-01-08 UTC?",
+  },
+  {
+    name: "api_budget",
+    prompt: "How much of the org's daily API request limit remains, and how many Bulk query jobs exist?",
+  },
+  {
+    name: "custom_objects",
+    prompt: "Which custom objects does the org have, with their key prefixes, and what is the org's edition?",
+  },
+  {
+    name: "access_review",
+    prompt:
+      "List active users with their profile and how many active users that profile has, plus the number of permission sets and Account record types.",
   },
 ];
 
 export const CATALOG_TAGS: Record<string, string> = {
-  "vgi.title": "Salesforce",
+  "vgi.title": "Salesforce CRM",
   "vgi.subtitle": "Salesforce CRM as SQL: SOQL pushdown, Bulk API 2.0, describe-typed objects and a free ID toolkit.",
   "vgi.doc_llm": CATALOG_DOC_LLM,
   "vgi.doc_md": CATALOG_DOC_MD,

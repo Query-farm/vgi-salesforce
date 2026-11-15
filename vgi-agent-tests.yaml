@@ -1,16 +1,45 @@
 # Private graders for the public vgi.agent_test_tasks in the worker's catalog metadata.
-# `vgi-lint lint --ai` runs an agent on each prompt and grades it with check_sql.
-# See https://github.com/Query-farm/vgi-lint-check (VGI920).
+# `vgi-lint lint --ai` runs an agent on each prompt and grades it with reference_sql (VGI920).
+#
+# The ID-toolkit tasks need nothing. Every other task needs a `salesforce` secret pointing at an org
+# (the offline replay org in test/mock_api/server.py works: its data is fixed, so reference_sql applies).
 tasks:
-  - name: formal_greeting
-    reference_sql: SELECT salesforce.main.greet('Grace', 'formal') AS greeting
-  - name: sum_of_squares
-    reference_sql: SELECT sum(squared) AS total FROM salesforce.main.sequence_table(10)
-  - name: stepped_sequence
-    reference_sql: SELECT n FROM salesforce.main.sequence_table(4, step := 5) ORDER BY n
-  # Reads the public demo API (https://vgi-starter-api.query-farm.services/v1).
-  - name: items_per_category
-    check_sql: >-
-      SELECT count(*) = 3 AND sum(items) = 25
-      FROM (SELECT category, count(*) AS items
-            FROM salesforce.main.fetch_items('https://vgi-starter-api.query-farm.services/v1') GROUP BY category)
+  - name: id18_conversion
+    reference_sql: >-
+      SELECT salesforce.main.id18('001Dn00000AbCdE') AS id18
+  - name: validate_ids
+    reference_sql: >-
+      SELECT id, salesforce.main.is_valid_id(id) AS valid FROM (VALUES ('001Dn00000AbCdEIAV'), ('001Dn00000AbCdEAAA'), ('n/a')) t(id) ORDER BY id
+  - name: object_of_prefix
+    reference_sql: >-
+      SELECT salesforce.main.object_of('00QDn000001aBcD') AS object_name, salesforce.main.key_prefix('00QDn000001aBcD') AS prefix, salesforce.main.id15('00QDn000001aBcD') AS id15
+  - name: quote_literal
+    reference_sql: >-
+      SELECT 'LastName = ' || salesforce.main.soql_literal('O''Brien') AS condition
+  - name: open_pipeline_by_stage
+    reference_sql: >-
+      SELECT stage_name, sum(amount) AS pipeline FROM salesforce.main.query_object('Opportunity', fields := ['StageName', 'Amount', 'IsClosed']) WHERE NOT is_closed GROUP BY stage_name ORDER BY stage_name
+  - name: won_deals_soql
+    reference_sql: >-
+      SELECT deals, total FROM salesforce.main.soql('SELECT COUNT(Id) deals, SUM(Amount) total FROM Opportunity WHERE IsWon = TRUE')
+  - name: task_targets
+    reference_sql: >-
+      SELECT t.subject, o.name, r.doc->>'StageName' AS stage FROM salesforce.main.soql('SELECT Subject, WhatId FROM Task') t, LATERAL salesforce.main.lookup(t.what_id, object_name := 'Opportunity', fields := ['Name']) o, LATERAL salesforce.main.record('Opportunity', t.what_id) r ORDER BY t.subject
+  - name: stage_picklist
+    reference_sql: >-
+      SELECT p.value, m.active FROM salesforce.main.picklist_values('Opportunity', 'StageName') p JOIN salesforce.meta.picklist_values m ON m.object_name = 'Opportunity' AND m.field_name = 'StageName' AND m.value = p.value ORDER BY p.value
+  - name: custom_field_columns
+    reference_sql: >-
+      SELECT d.name, d.column_name, c.duckdb_type FROM salesforce.main.describe_fields('Invoice__c') d LEFT JOIN salesforce.meta.columns c ON c.object_name = 'Invoice__c' AND c.sf_field_name = d.name WHERE d.custom ORDER BY d.name
+  - name: changes_this_week
+    reference_sql: >-
+      SELECT (SELECT count(*) FROM salesforce.main.updated_ids('Opportunity', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-08 00:00:00+00')) AS updated, (SELECT count(*) FROM salesforce.main.deleted_ids('Opportunity', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-08 00:00:00+00')) AS deleted
+  - name: api_budget
+    reference_sql: >-
+      SELECT (SELECT remaining FROM salesforce.meta.limits WHERE limit_name = 'DailyApiRequests') AS remaining, (SELECT count(*) FROM salesforce.meta.jobs) AS bulk_jobs
+  - name: custom_objects
+    reference_sql: >-
+      SELECT o.name, o.key_prefix, g.edition FROM salesforce.meta.objects o, salesforce.meta.organizations g WHERE o.custom ORDER BY o.name
+  - name: access_review
+    reference_sql: >-
+      SELECT u.name, p.name AS profile, p.active_users, (SELECT count(*) FROM salesforce.meta.permission_sets) AS permission_sets, (SELECT count(*) FROM salesforce.meta.record_types WHERE object_name = 'Account') AS account_record_types FROM salesforce.meta.users u JOIN salesforce.meta.profiles p ON p.id = u.profile_id WHERE u.active ORDER BY u.name

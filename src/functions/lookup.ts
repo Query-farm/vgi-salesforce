@@ -144,6 +144,15 @@ export const record: VgiFunction = defineRowTransformFunction<Record<string, nev
     out.emit(batchFromColumns(cols, params.outputSchema), parentRowsMetadata(rows, rows.length));
   },
   tags: docTags({
+    columns: [
+      { name: "object_name", type: "VARCHAR", description: "The object API name passed in." },
+      { name: "sf_id", type: "VARCHAR", description: "The 18-character record id." },
+      {
+        name: "doc",
+        type: "JSON",
+        description: "Every readable field of the record (NULL when no such record is visible).",
+      },
+    ],
     title: "Fetch Records as JSON",
     category: "lookup",
     keywords: "salesforce, record, lateral, enrichment, polymorphic, whatid, json, batch",
@@ -232,6 +241,7 @@ export const lookup: VgiFunction = defineRowTransformFunction<LookupArgs>({
     out.emit(batchFromColumns(data, params.outputSchema), parentRowsMetadata(rows, rows.length));
   },
   tags: docTags({
+    dynamicColumns: true,
     title: "Typed Record Lookup",
     category: "lookup",
     keywords: "salesforce, lookup, lateral, enrichment, join, typed, batch, cache",
@@ -293,13 +303,19 @@ export const picklistValues: VgiFunction = defineRowTransformFunction<Record<str
     out.emit(batchFromColumns(cols, params.outputSchema), parentRowsMetadata(rows, rows.length));
   },
   tags: docTags({
-    title: "Picklist Values",
+    columns: [
+      { name: "value", type: "VARCHAR", description: "API value stored on records." },
+      { name: "label", type: "VARCHAR", description: "Display label." },
+      { name: "active", type: "BOOLEAN", description: "Whether the value can be chosen." },
+      { name: "default_value", type: "BOOLEAN", description: "Whether it is the field's default." },
+    ],
+    title: "Field Picklist Values",
     category: "metadata",
     keywords: "salesforce, picklist, values, labels, stage, status, lateral",
     docLlm:
       "picklist_values(object_name, field_name) returns value, label, active and default_value for each picklist " +
-      "value of the field (from describe, cached 1 h). Works with literals or per row: " +
-      "SELECT * FROM salesforce.main.picklist_values('Opportunity', 'StageName').",
+      "value of the field (from describe, cached 1 h). Pass literals for one field, or columns of a table of " +
+      "(object, field) pairs to list many at once.",
     docMd: "## picklist_values(object_name, field_name)\n\nPicklist values from describe; 1 → N per input row.",
   }),
   examples: [

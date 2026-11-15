@@ -7,6 +7,7 @@
 import {
   batchFromColumns,
   bool,
+  constraintRecord,
   dateDay,
   defineTableFunction,
   float64,
@@ -218,18 +219,55 @@ export function defineFixed<A extends Record<string, unknown>>(spec: FixedSpec<A
   });
 }
 
+export interface TableKeys {
+  /** Primary-key column (a Salesforce id or name the platform keeps unique). */
+  pk?: string[];
+  /** Foreign keys: column → referenced table (its PK column has the same name). */
+  fks?: { column: string; table: string; refColumn: string }[];
+}
+
+const META_PATH = ["meta"];
+
 /**
- * A parameterless spec as a catalog table. Salesforce ids are unique, but the worker
- * cannot attest ENFORCED / ALL_ROWS constraints for data it does not own, so no
- * constraints are declared.
+ * A parameterless spec as a catalog table in `meta`. Salesforce enforces the uniqueness of
+ * record ids (and object / limit names) on every write path, so those keys are attested
+ * ENFORCED / ALL_ROWS.
  */
-export function fixedTable(spec: FixedSpec<Record<string, never>>): TableDescriptor {
+export function fixedTable(spec: FixedSpec<Record<string, never>>, keys: TableKeys = {}): TableDescriptor {
   const fn = defineFixed({ ...spec, name: `${spec.name}_scan` });
+  const rec = (id: string, kind: "NOT_NULL" | "PRIMARY_KEY", cols: string[]) =>
+    constraintRecord({
+      schemaPath: META_PATH,
+      table: spec.name,
+      id,
+      kind,
+      columns: cols.map((c) => [c]),
+      enforcement: "ENFORCED",
+      validation: "ALL_ROWS",
+    });
+  const constraints = keys.pk
+    ? [...keys.pk.map((c) => rec(`${c}_not_null`, "NOT_NULL", [c])), rec("pk", "PRIMARY_KEY", keys.pk)]
+    : [];
+  for (const fk of keys.fks ?? []) {
+    constraints.push(
+      constraintRecord({
+        schemaPath: META_PATH,
+        table: spec.name,
+        id: `fk_${fk.column}`,
+        kind: "FOREIGN_KEY",
+        columns: [[fk.column]],
+        enforcement: "ENFORCED",
+        validation: "ALL_ROWS",
+        references: { schemaPath: META_PATH, table: fk.table, columns: [[fk.refColumn]], constraintId: "pk" },
+      }),
+    );
+  }
   return {
     name: spec.name,
     comment: spec.description,
     columns: colSchema(spec.cols),
     function: fn,
+    constraints,
     tags: {
       ...docTags({ ...spec, columns: colDocs(spec.cols) }),
       "vgi.example_queries": JSON.stringify(spec.examples),
