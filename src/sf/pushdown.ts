@@ -17,7 +17,7 @@
  * - Under OR every branch must translate, or the whole OR is dropped; under AND the
  *   translatable conjuncts are kept.
  *
- * `exact` reports whether every pushed predicate became an equivalent SOQL condition;
+ * `exact` reports whether every pushed predicate was required and became an equivalent SOQL condition;
  * only then may a LIMIT be pushed into SOQL as well.
  */
 
@@ -279,8 +279,15 @@ export function toSoql(filters: PushdownFilters | undefined, columns: ColumnSpec
   const col: Col = (e) => (e.node === "column_ref" ? byName.get(e.columnName) : undefined);
   const conditions: string[] = [];
   let exact = true;
-  const required = (filters?.predicates ?? []).filter((p) => p.mode === "required").map((p) => p.expression);
-  if ((filters?.predicates ?? []).length !== required.length) exact = false;
+  // Required predicates were dropped from DuckDB's plan; advisory ones (an IN list DuckDB
+  // derived from an OR it still evaluates) only prune, so both may narrow the SOQL. Top-N
+  // dynamic filters change during the scan and are not sent.
+  const all = filters?.predicates ?? [];
+  const usable = all.filter((p) => p.source !== "top_n");
+  const required = usable.map((p) => p.expression);
+  // (A Top-N dynamic filter is implied by the very ORDER BY … LIMIT being pushed, so it does
+  // not make the translation inexact.)
+  if (usable.some((p) => p.mode !== "required")) exact = false;
   for (const e of required) {
     const p = translate(e, col);
     if (!p) exact = false;

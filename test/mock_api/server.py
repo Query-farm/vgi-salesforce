@@ -279,7 +279,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/health":
             return self.send(200, {"ok": True})
 
-        entry = {"method": method, "path": path, "q": qs.get("q"), "query": qs, "body": raw or None}
+        entry = {"method": method, "path": path, "q": qs.get("q"),
+                 "qs": "&".join(f"{k}={v}" for k, v in sorted(qs.items()) if k != "q"), "body": raw or None,
+                 "auth": (self.headers.get("Authorization") or "")[:7]}
         if path == "/services/oauth2/token":
             STATE["log"].append({**entry, "body": None, "grant_type": parse_qs(raw).get("grant_type", [None])[0]})
             return self.token(parse_qs(raw))
@@ -352,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, describe_global(), H)
         p = rest.split("/")
         if p[0] == "sobjects" and len(p) == 3 and p[2] == "describe":
+            if not any(k.lower() == p[1].lower() for k in org.describes):
+                return self.err(404, "NOT_FOUND", "The requested resource does not exist", H)
             ims = self.headers.get("If-Modified-Since")
             if ims:
                 return self.send(304, None, H)

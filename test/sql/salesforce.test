@@ -1,148 +1,596 @@
 # name: test/sql/salesforce.test
-# description: SQL-level tests for the salesforce worker, run through DuckDB by ci/run-integration.sh
+# description: Tier 0 ID toolkit, auth, query_object / soql pushdown and typing, sobjects views, meta tables, lookups and replication, against the replay server
 # group: [salesforce]
-# managed-by: vgi-starters (edit upstream in shared/, then run tools/render.py)
 
 require vgi
 
 require-env SALESFORCE_WORKER
 
-require-env SALESFORCE_MOCK_API
+require-env SALESFORCE_FIXTURE_URL
 
-require-env SALESFORCE_MOCK_API_AUTH
+require-env SALESFORCE_TEST_PRIVATE_KEY
+
+require-env SALESFORCE_STATE_DIR
 
 statement ok
-ATTACH 'salesforce' (TYPE vgi, LOCATION '{SALESFORCE_WORKER}');
+LOAD httpfs;
 
-# ---------------------------------------------------------------- greet (scalar)
+statement ok
+LOAD json;
+
+statement ok
+ATTACH 'salesforce' (TYPE vgi, LOCATION '{SALESFORCE_WORKER}', OBJECTS 'Account,Opportunity,Invoice__c', STATE_DIR '{SALESFORCE_STATE_DIR}');
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=main');
+
+# ================================================================ Tier 0: no secret, no network
+
+query TTTT
+SELECT salesforce.main.id18('001Dn00000AbCdE'), salesforce.main.id18('001Dn00000AbCdEIAV'), salesforce.main.id18('001dn00000abcdeiav'), salesforce.main.id18('nope');
+----
+001Dn00000AbCdEIAV	001Dn00000AbCdEIAV	001Dn00000AbCdEIAV	NULL
+
+query TTT
+SELECT salesforce.main.id15('001DN00000ABCDEIAV'), salesforce.main.key_prefix('006Dn000001aBcD'), salesforce.main.object_of('500Dn000002XyZq');
+----
+001Dn00000AbCdE	006	Case
+
+query TTTT
+SELECT salesforce.main.is_valid_id('001Dn00000AbCdEIAV'), salesforce.main.is_valid_id('001Dn00000AbCdEAAA'), salesforce.main.is_valid_id('n/a'), salesforce.main.is_valid_id(NULL);
+----
+true	false	false	NULL
 
 query T
-SELECT salesforce.main.greet('Ada');
+SELECT salesforce.main.soql_literal('O''Brien \ "x"');
 ----
-Hi, Ada!
+'O\'Brien \\ \"x\"'
 
-query T
-SELECT salesforce.main.greet('Ada', 'formal');
-----
-Good day, Ada.
-
-# NULL in, NULL out.
-query T
-SELECT salesforce.main.greet(NULL);
-----
-NULL
-
-# Works over a whole column, one result per row.
-query T
-SELECT salesforce.main.greet(name) FROM (VALUES ('Ada'), ('Grace'), (NULL)) AS t(name) ORDER BY ALL NULLS LAST;
-----
-Hi, Ada!
-Hi, Grace!
-NULL
-
-# `style` is constrained to 'casual' | 'formal' and checked when the query is bound.
-# (No expected message: each SDK words constraint errors its own way.)
-statement error
-SELECT salesforce.main.greet('Ada', 'loud');
-----
-<REGEX>:.*
-
-# ------------------------------------------------------ sequence_table (table fn)
-
+# Many rows, NULLs and repeats: the 15/18 forms of the same id join.
 query II
-SELECT n, squared FROM salesforce.main.sequence_table(4) ORDER BY n;
+SELECT count(*), count(DISTINCT salesforce.main.id18(id)) FROM (SELECT CASE WHEN i % 2 = 0 THEN '001Dn00000AbCdE' WHEN i % 3 = 0 THEN NULL ELSE '001Dn00000AbCdEIAV' END AS id FROM range(5000) t(i)) WHERE id IS NOT NULL;
 ----
-0	0
-1	1
-2	4
-3	9
+4167	1
 
-# Named argument with a default.
-query I
-SELECT n FROM salesforce.main.sequence_table(3, step := 5) ORDER BY n;
+# Without a secret, connected functions say how to create one.
+statement error
+SELECT count(*) FROM salesforce.main.query_object('Account');
 ----
-0
+<REGEX>:.*no salesforce secret.*
+
+# ================================================================ auth flows
+
+statement ok
+CREATE SECRET sf_bad (TYPE salesforce, INSTANCE_URL '{SALESFORCE_FIXTURE_URL}', LOGIN_URL '{SALESFORCE_FIXTURE_URL}', CLIENT_ID '3MVG9fixture.consumer.key', CLIENT_SECRET 'wrong');
+
+statement error
+SELECT count(*) FROM salesforce.main.query_object('Account');
+----
+<REGEX>:.*OAuth \(client_credentials\) failed with HTTP 400.*invalid_client.*connect-an-org.*
+
+statement ok
+DROP SECRET sf_bad;
+
+statement ok
+CREATE SECRET sf_pw (TYPE salesforce, INSTANCE_URL '{SALESFORCE_FIXTURE_URL}', USERNAME 'integration@acme.example');
+
+statement error
+SELECT count(*) FROM salesforce.main.query_object('Account');
+----
+<REGEX>:.*Username/password login is not supported.*
+
+statement ok
+DROP SECRET sf_pw;
+
+statement ok
+CREATE SECRET sf_insecure (TYPE salesforce, INSTANCE_URL 'http://acme.my.salesforce.com', ACCESS_TOKEN 'x');
+
+statement error
+SELECT count(*) FROM salesforce.main.query_object('Account');
+----
+<REGEX>:.*must use https.*
+
+statement ok
+DROP SECRET sf_insecure;
+
+# Client credentials (exchanged at the instance URL).
+statement ok
+CREATE SECRET sf_cc (TYPE salesforce, INSTANCE_URL '{SALESFORCE_FIXTURE_URL}', CLIENT_ID '3MVG9fixture.consumer.key', CLIENT_SECRET 'fixture-consumer-secret');
+
+query I
+SELECT count(*) FROM salesforce.main.query_object('Account');
+----
 5
-10
 
-# Larger than one batch: the cursor must carry across process calls.
-query II
-SELECT count(*), max(n) FROM salesforce.main.sequence_table(25000);
-----
-25000	24999
+statement ok
+DROP SECRET sf_cc;
+
+# Refresh token (exchanged at the login URL).
+statement ok
+CREATE SECRET sf_rt (TYPE salesforce, INSTANCE_URL '{SALESFORCE_FIXTURE_URL}', LOGIN_URL '{SALESFORCE_FIXTURE_URL}', CLIENT_ID '3MVG9fixture.consumer.key', REFRESH_TOKEN '5Aep861fixture.refresh');
 
 query I
-SELECT count(*) FROM salesforce.main.sequence_table(0);
+SELECT count(*) FROM salesforce.main.query_object('Contact');
+----
+6
+
+statement ok
+DROP SECRET sf_rt;
+
+# JWT bearer with the wrong user: Salesforce's own error text comes through.
+statement ok
+CREATE SECRET sf_jwt_bad (TYPE salesforce, INSTANCE_URL '{SALESFORCE_FIXTURE_URL}', LOGIN_URL '{SALESFORCE_FIXTURE_URL}', CLIENT_ID '3MVG9fixture.consumer.key', USERNAME 'someone@else.example', PRIVATE_KEY '{SALESFORCE_TEST_PRIVATE_KEY}');
+
+statement error
+SELECT count(*) FROM salesforce.main.query_object('Lead');
+----
+<REGEX>:.*jwt_bearer.*user hasn't approved this consumer.*
+
+statement ok
+DROP SECRET sf_jwt_bad;
+
+# JWT bearer (the recommended flow): every test below uses it. The signature is verified.
+statement ok
+CREATE SECRET sf (TYPE salesforce, INSTANCE_URL '{SALESFORCE_FIXTURE_URL}', LOGIN_URL '{SALESFORCE_FIXTURE_URL}', CLIENT_ID '3MVG9fixture.consumer.key', USERNAME 'integration@acme.example', PRIVATE_KEY '{SALESFORCE_TEST_PRIVATE_KEY}', API_VERSION '64.0');
+
+# Reset drops every issued token: the next call gets 401 INVALID_SESSION_ID and re-authenticates once.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=reauth');
+
+query I
+SELECT count(*) FROM salesforce.main.query_object('Lead');
+----
+3
+
+query I
+SELECT count(*) FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=reauth') WHERE path = '/services/oauth2/token';
+----
+1
+
+# ================================================================ query_object: typing
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT id, name, annual_revenue, number_of_employees, billing_address, regions, acme_score, hq_location, created_date, tier FROM salesforce.main.query_object('Account'));
+----
+id	VARCHAR
+name	VARCHAR
+annual_revenue	DECIMAL(18,0)
+number_of_employees	INTEGER
+billing_address	STRUCT(street VARCHAR, city VARCHAR, state VARCHAR, postal_code VARCHAR, country VARCHAR, state_code VARCHAR, country_code VARCHAR, latitude DOUBLE, longitude DOUBLE, geocode_accuracy VARCHAR)
+regions	VARCHAR[]
+acme_score	DECIMAL(5,1)
+hq_location	STRUCT(latitude DOUBLE, longitude DOUBLE)
+created_date	TIMESTAMP WITH TIME ZONE
+tier	VARCHAR
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM salesforce.main.query_object('Invoice__c')) WHERE column_name IN ('amount', 'issued_on', 'paid', 'line_count', 'notes', 'acme_region', 'due_time', 'pdf_body', 'account') ORDER BY column_name;
+----
+account	VARCHAR
+acme_region	VARCHAR
+amount	DECIMAL(18,2)
+due_time	TIME
+issued_on	DATE
+line_count	DECIMAL(18,0)
+notes	VARCHAR
+paid	BOOLEAN
+
+query TTTTRT
+SELECT name, billing_address.city, billing_address.postal_code, regions::VARCHAR, hq_location.latitude, acme_score FROM salesforce.sobjects.Account ORDER BY name;
+----
+Acme Corp	San Francisco	94105	[AMER, EMEA]	37.7936	92.5
+Globex	Springfield	NULL	[AMER]	NULL	61.0
+Initech	Austin	78744	NULL	NULL	40.2
+O'Malley & Sons	Dublin	NULL	[EMEA]	NULL	55.5
+Umbrella	London	NULL	[EMEA, APAC]	51.5	NULL
+
+query TTTT
+SELECT name, amount, due_time, replace(notes, chr(10), '|') FROM salesforce.sobjects.Invoice__c WHERE name IN ('INV-0001', 'INV-0002') ORDER BY name;
+----
+INV-0001	1000.00	17:00:00	Net 30|Thanks!
+INV-0002	2500.50	NULL	Quote "rush", please
+
+# Soft-deleted rows only with include_deleted (queryAll).
+query II
+SELECT (SELECT count(*) FROM salesforce.main.query_object('Invoice__c')), (SELECT count(*) FROM salesforce.main.query_object('Invoice__c', include_deleted := true));
+----
+6	7
+
+# ================================================================ pushdown: SQL → SOQL
+# Each query is checked twice: the rows (the replay server evaluates the SOQL it receives,
+# so a wrong translation returns wrong rows) and the SOQL text it received.
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=pd1');
+
+query TR
+SELECT name, amount FROM salesforce.sobjects.Opportunity WHERE stage_name = 'Negotiation' AND amount >= 120000.50 AND close_date < DATE '2026-04-01' ORDER BY name;
+----
+Acme Renewal	120000.5
+umbrella grid	310000.0
+
+query T
+SELECT DISTINCT q FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=pd1') WHERE q LIKE '%FROM Opportunity%';
+----
+SELECT Name, StageName, Amount, CloseDate, Id, SystemModstamp FROM Opportunity WHERE StageName = 'Negotiation' AND Amount >= 120000.50 AND CloseDate < 2026-04-01 ORDER BY SystemModstamp ASC, Id ASC
+
+# IN, IS NULL, booleans, timestamps, a quote in a string, LIKE prefix.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=pd2');
+
+query T
+SELECT name FROM salesforce.sobjects.Opportunity WHERE stage_name IN ('Closed Won', 'Prospecting') AND account_id IS NOT NULL AND is_won AND created_date < TIMESTAMPTZ '2026-01-01 00:00:00+00' ORDER BY name;
+----
+Acme Platform
+O'Malley POS
+
+query T
+SELECT name FROM salesforce.sobjects.Account WHERE name = 'O''Malley & Sons';
+----
+O'Malley & Sons
+
+query T
+SELECT name FROM salesforce.sobjects.Opportunity WHERE name LIKE 'Acme%' ORDER BY name;
+----
+Acme Platform
+Acme Renewal
+
+query T
+SELECT DISTINCT q FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=pd2') WHERE q IS NOT NULL ORDER BY q;
+----
+SELECT CreatedDate, AccountId, Name, StageName, IsWon, Id, SystemModstamp FROM Opportunity WHERE CreatedDate < 2026-01-01T00:00:00Z AND AccountId != null AND StageName IN ('Closed Won', 'Prospecting') AND IsWon = TRUE ORDER BY SystemModstamp ASC, Id ASC
+SELECT Name, Id, SystemModstamp FROM Account WHERE Name = 'O\'Malley & Sons' ORDER BY SystemModstamp ASC, Id ASC
+SELECT Name, Id, SystemModstamp FROM Opportunity WHERE Name LIKE 'Acme%' ORDER BY SystemModstamp ASC, Id ASC
+
+# SOQL compares strings case-insensitively; DuckDB does not. = is pushed (a superset) and the
+# exact SQL semantics are re-applied: 'umbrella grid' must not match 'Umbrella Grid'.
+query I
+SELECT count(*) FROM salesforce.sobjects.Opportunity WHERE name = 'Umbrella Grid';
 ----
 0
 
-# count is constrained to [0, 1000000].
+# String != and ranges are not pushed (case-insensitive collation would drop rows SQL keeps).
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=pd3');
+
+query I
+SELECT count(*) FROM salesforce.sobjects.Opportunity WHERE name != 'acme platform' AND name > 'U';
+----
+1
+
+query T
+SELECT DISTINCT q FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=pd3') WHERE q IS NOT NULL;
+----
+SELECT Name, Id, SystemModstamp FROM Opportunity ORDER BY SystemModstamp ASC, Id ASC
+
+# OR of translatable predicates on one column (DuckDB keeps multi-column ORs above the scan);
+# a sub-second timestamp bound is widened to whole seconds and re-applied exactly.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=pd4');
+
+query T
+SELECT name FROM salesforce.sobjects.Opportunity WHERE (probability >= 70 OR probability <= 10) AND system_modstamp > TIMESTAMPTZ '2026-01-01 09:00:00.5+00' ORDER BY name;
+----
+Acme Renewal
+Globex Pilot
+Initech TPS
+O'Malley POS
+Orphan Deal
+
+query T
+SELECT DISTINCT q FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=pd4') WHERE q IS NOT NULL;
+----
+SELECT SystemModstamp, Name, Probability, Id FROM Opportunity WHERE SystemModstamp >= 2026-01-01T09:00:00Z AND (Probability >= 70 OR Probability <= 10) ORDER BY SystemModstamp ASC, Id ASC
+
+# ORDER BY … LIMIT becomes SOQL ORDER BY … LIMIT when DuckDB hands the scan its Top-N hint
+# (it does so only when no WHERE remains, since it cannot know a filter was pushed exactly).
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=pd5');
+
+query TR
+SELECT name, amount FROM salesforce.sobjects.Opportunity ORDER BY amount DESC NULLS LAST LIMIT 2;
+----
+umbrella grid	310000.0
+Acme Platform	250000.0
+
+query T
+SELECT DISTINCT q FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=pd5') WHERE q IS NOT NULL;
+----
+SELECT Name, Amount, Id, SystemModstamp FROM Opportunity ORDER BY Amount DESC NULLS LAST LIMIT 2
+
+# Explicit arguments: fields with a relationship path, where_clause, modified_after, max_rows.
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=pd6');
+
+query TTT
+SELECT name, account_name, account_owner_name FROM salesforce.main.query_object('Opportunity', fields := ['Name', 'Account.Name', 'Account.Owner.Name'], where_clause := 'Amount > 100000', modified_after := TIMESTAMPTZ '2026-01-02 00:00:00+00') ORDER BY name;
+----
+Acme Renewal	Acme Corp	Ada Lovelace
+umbrella grid	Umbrella	Grace Hopper
+
+query T
+SELECT DISTINCT q FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=pd6') WHERE q IS NOT NULL;
+----
+SELECT Name, Account.Name, Account.Owner.Name, Id, SystemModstamp FROM Opportunity WHERE (Amount > 100000) AND SystemModstamp >= 2026-01-02T00:00:00Z ORDER BY SystemModstamp ASC, Id ASC
+
+# A where_clause that Salesforce rejects surfaces Salesforce's message.
 statement error
-SELECT * FROM salesforce.main.sequence_table(-1);
+SELECT * FROM salesforce.main.query_object('Opportunity', where_clause := 'CloseDate = ''2026-01-01''');
 ----
-<REGEX>:.*
+<REGEX>:.*HTTP 400.*must be of type date.*
 
-# Named arguments are constrained too: step >= 1.
 statement error
-SELECT * FROM salesforce.main.sequence_table(3, step := 0);
+SELECT * FROM salesforce.main.query_object('NoSuchObject__c');
 ----
-<REGEX>:.*
+<REGEX>:.*does not exist in this org.*
 
-# ------------------------------------------------- fetch_items (REST table fn)
+# REST paging: 2 records per page exercises nextRecordsUrl (the cursor rides scan state).
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?rest_page_size=2');
 
-query IIT
-SELECT count(*), sum(id), min(name) FROM salesforce.main.fetch_items('{SALESFORCE_MOCK_API}', page_size := 4);
+query IT
+SELECT count(*), string_agg(name, ',' ORDER BY name) FROM salesforce.sobjects.Opportunity;
 ----
-25	325	item-01
+8	Acme Platform,Acme Renewal,Globex Pilot,Initech Expansion,Initech TPS,O'Malley POS,Orphan Deal,umbrella grid
+
+statement ok
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__config?rest_page_size=2000');
+
+# ================================================================ soql(): the closed grammar
+
+query TIR
+SELECT stage_name, deals, total FROM salesforce.main.soql('SELECT StageName, COUNT(Id) deals, SUM(Amount) total FROM Opportunity GROUP BY StageName') ORDER BY stage_name;
+----
+Closed Lost	1	42000.0
+Closed Won	2	258000.0
+Negotiation	2	430000.5
+Prospecting	2	15000.0
+Qualification	1	99000.99
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM salesforce.main.soql('SELECT Name, Account.Owner.Name, CloseDate, IsWon, Discount_Pct__c FROM Opportunity'));
+----
+name	VARCHAR
+account_owner_name	VARCHAR
+close_date	DATE
+is_won	BOOLEAN
+discount_pct	DECIMAL(5,2)
+
+query TTT
+SELECT name, account_name, account_owner_name FROM salesforce.main.soql('SELECT Name, Account.Name, Account.Owner.Name FROM Contact WHERE Email != null AND Account.Name LIKE ''acme%''') ORDER BY name;
+----
+Road Runner	Acme Corp	Ada Lovelace
+Wile Coyote	Acme Corp	Ada Lovelace
+
+query I
+SELECT count FROM salesforce.main.soql('SELECT COUNT() FROM Lead WHERE IsConverted = FALSE');
+----
+2
+
+query II
+SELECT expr0, expr1 FROM salesforce.main.soql('SELECT COUNT(Id), COUNT_DISTINCT(AccountId) FROM Opportunity');
+----
+8	5
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM salesforce.main.soql('SELECT FIELDS(STANDARD) FROM Lead')) WHERE column_name IN ('company', 'is_converted', 'annual_revenue') ORDER BY column_name;
+----
+annual_revenue	DECIMAL(18,0)
+company	VARCHAR
+is_converted	BOOLEAN
+
+# Polymorphic relationships expose Id, Name and Type.
+query TTT
+SELECT subject, what_name, what_type FROM salesforce.main.soql('SELECT Subject, What.Name, What.Type FROM Task') ORDER BY subject;
+----
+Account review	Globex	Account
+Chase invoice	INV-0001	Invoice__c
+Kickoff call	Acme Platform	Opportunity
+Send contract	Acme Renewal	Opportunity
+
+statement error
+SELECT * FROM salesforce.main.soql('SELECT Id, (SELECT Id FROM Contacts) FROM Account');
+----
+<REGEX>:.*unsupported select item '\(SELECT Id FROM Contacts\)'.*
+
+statement error
+SELECT * FROM salesforce.main.soql('SELECT toLabel(StageName) FROM Opportunity');
+----
+<REGEX>:.*unsupported select item 'toLabel\(StageName\)'.*
+
+statement error
+SELECT * FROM salesforce.main.soql('SELECT FIELDS(ALL) FROM Account');
+----
+<REGEX>:.*FIELDS\(ALL\).*non-deterministic.*
+
+statement error
+SELECT * FROM salesforce.main.soql('SELECT Nope__c FROM Account');
+----
+<REGEX>:.*Account has no field 'Nope__c'.*
+
+statement error
+SELECT * FROM salesforce.main.soql('SELECT StageName, COUNT(Id) FROM Opportunity GROUP BY StageName', api := 'bulk');
+----
+<REGEX>:.*aggregate queries cannot run as Bulk API 2.0 jobs.*
+
+# ================================================================ sobjects views + scope
+
+query T
+SELECT table_name FROM information_schema.tables WHERE table_catalog = 'salesforce' AND table_schema = 'sobjects' ORDER BY table_name;
+----
+Account
+Invoice__c
+Opportunity
+
+query R
+SELECT sum(o.amount) FROM salesforce.sobjects.Opportunity o JOIN salesforce.sobjects.Account a ON a.id = o.account_id WHERE a.tier = 'Gold' AND o.is_won;
+----
+250000.0
+
+statement error
+SELECT * FROM salesforce.sobjects.Campaign;
+----
+<REGEX>:.*object 'Campaign' is not in the ATTACH OBJECTS scope\. Re-attach with OBJECTS 'Account,Opportunity,Invoice__c,Campaign'.*
+
+statement error
+ATTACH 'salesforce' AS sf_glob (TYPE vgi, LOCATION '{SALESFORCE_WORKER}', OBJECTS 'Acme_*__c');
+----
+<REGEX>:.*wildcards are not supported.*
+
+# ================================================================ meta tables
+
+query TTTT
+SELECT name, label, key_prefix, custom FROM salesforce.meta.objects WHERE name IN ('Account', 'Invoice__c') ORDER BY name;
+----
+Account	Account	001	false
+Invoice__c	Invoice	a0X	true
+
+query TTT
+SELECT sf_field_name, column_name, duckdb_type FROM salesforce.meta.columns WHERE object_name = 'Account' AND sf_field_name IN ('Acme__Score__c', 'BillingAddress', 'Owner__c', 'OwnerId') ORDER BY sf_field_name;
+----
+Acme__Score__c	acme_score	DECIMAL(5,1)
+BillingAddress	billing_address	STRUCT(street VARCHAR, city VARCHAR, state VARCHAR, postal_code VARCHAR, country VARCHAR, state_code VARCHAR, country_code VARCHAR, latitude DOUBLE, longitude DOUBLE, geocode_accuracy VARCHAR)
+OwnerId	owner_id	VARCHAR
+Owner__c	owner	VARCHAR
+
+query TTT
+SELECT field_name, value, active FROM salesforce.meta.picklist_values WHERE object_name = 'Account' AND field_name = 'Type' ORDER BY value;
+----
+Type	Customer	true
+Type	Old Reseller	false
+Type	Partner	true
+Type	Prospect	true
+
+query TTT
+SELECT object_name, developer_name, active FROM salesforce.meta.record_types ORDER BY object_name, developer_name;
+----
+Account	Customer	true
+Account	Partner	true
+Opportunity	Legacy	false
+
+query TTTT
+SELECT name, profile_name, role_name, active FROM salesforce.meta.users ORDER BY name;
+----
+Ada Lovelace	System Administrator	CEO	true
+Grace Hopper	Sales User	Sales Rep	true
+Old Integration	Sales User	NULL	false
+
+query TTI
+SELECT name, user_license, active_users FROM salesforce.meta.profiles ORDER BY name;
+----
+Read Only	Salesforce	0
+Sales User	Salesforce	1
+System Administrator	Salesforce	1
 
 query TI
-SELECT category, count(*) FROM salesforce.main.fetch_items('{SALESFORCE_MOCK_API}') GROUP BY category ORDER BY category;
+SELECT label, assignments FROM salesforce.meta.permission_sets ORDER BY label;
 ----
-hardware	8
-service	8
-software	9
+API Only	1
+Sales Ops	2
 
-# The harness runs SALESFORCE_MOCK_API with MOCK_API_FLAKY=1: every page answers
-# 429 + Retry-After once, so every query above also exercised the retry path.
-
-# SALESFORCE_MOCK_API_AUTH requires a bearer token ('test-token'). Every language's
-# fetch_items must put the HTTP status code in its error message.
-statement error
-SELECT count(*) FROM salesforce.main.fetch_items('{SALESFORCE_MOCK_API_AUTH}');
+query TTTT
+SELECT org_id, edition, is_sandbox, api_version FROM salesforce.meta.org;
 ----
-401
+00DDn0000000001MAA	Developer Edition	false	64.0
+
+query T
+SELECT limit_name FROM salesforce.meta.limits WHERE limit_name LIKE 'Daily%' ORDER BY limit_name;
+----
+DailyApiRequests
+DailyBulkV2QueryFileStorageMB
+DailyBulkV2QueryJobs
+
+query TTTT
+SELECT name, sf_type, column_name, duckdb_type FROM salesforce.main.describe_fields('Invoice__c') WHERE name IN ('Account__c', 'Pdf_Body__c', 'Status__c') ORDER BY name;
+----
+Account__c	reference	account	VARCHAR
+Pdf_Body__c	base64	NULL	NULL
+Status__c	picklist	status	VARCHAR
+
+query TT
+SELECT name, reference_to::VARCHAR FROM salesforce.main.describe_fields('Task') WHERE len(reference_to) > 1 ORDER BY name;
+----
+WhatId	[Account, Opportunity, Invoice__c]
+WhoId	[Contact, Lead]
+
+# ================================================================ lookups (blended, LATERAL)
 
 statement ok
-CREATE SECRET salesforce_api_test (TYPE salesforce_api, TOKEN 'test-token');
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=lk');
+
+query TTR
+SELECT t.subject, o.name, o.amount FROM salesforce.main.soql('SELECT Subject, WhatId FROM Task') t, LATERAL salesforce.main.lookup(t.what_id, object_name := 'Opportunity', fields := ['Name', 'Amount']) o ORDER BY t.subject;
+----
+Kickoff call	Acme Platform	250000.0
+Send contract	Acme Renewal	120000.5
+
+# 3,000 rows over 8 distinct ids: deduplicated and batched (a handful of collection calls, not 3,000).
+query II
+SELECT count(*), count(DISTINCT o.name) FROM (SELECT (['006Dn0000000001IAA','006Dn0000000002IAA','006Dn0000000003IAA','006Dn0000000004IAA'])[1 + i % 4] AS id FROM range(3000) t(i)) t, LATERAL salesforce.main.lookup(t.id, object_name := 'Opportunity', fields := ['Name']) o;
+----
+3000	4
 
 query I
-SELECT count(*) FROM salesforce.main.fetch_items('{SALESFORCE_MOCK_API_AUTH}', page_size := 25);
+SELECT count(*) <= 20 FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=lk') WHERE path LIKE '%/composite/sobjects/Opportunity';
 ----
-25
+true
 
-# Several pages: the token must survive between batches (over HTTP each batch is a
-# separate request, so a token kept only in memory is lost after page 1).
+# A custom-object id has no standard prefix: object_of is NULL and record() emits no row.
 query I
-SELECT count(*) FROM salesforce.main.fetch_items('{SALESFORCE_MOCK_API_AUTH}', page_size := 7);
+SELECT count(*) FROM (VALUES ('a0XDn0000000001')) t(id), LATERAL salesforce.main.record(salesforce.main.object_of(t.id), t.id) r;
 ----
-25
+0
 
+query TT
+SELECT r.doc->>'Name', r.doc->>'Status__c' FROM (VALUES ('a0XDn0000000001')) t(id), LATERAL salesforce.main.record('Invoice__c', t.id) r;
+----
+INV-0001	Paid
+
+query TTT
+SELECT r.object_name, r.doc->>'Name', r.doc->>'StageName' FROM (VALUES ('006Dn0000000002'), ('006Dn0000000099')) t(id), LATERAL salesforce.main.record(salesforce.main.object_of(t.id), t.id) r ORDER BY 2 NULLS LAST;
+----
+Opportunity	Acme Renewal	Negotiation
+Opportunity	NULL	NULL
+
+query TTT
+SELECT value, label, default_value FROM salesforce.main.picklist_values('Invoice__c', 'Status__c') ORDER BY value;
+----
+Draft	Draft	true
+Paid	Paid	false
+Sent	Sent	false
+Void	Void	false
+
+# ================================================================ replication
+
+query T
+SELECT sf_id FROM salesforce.main.updated_ids('Opportunity', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-08 00:00:00+00') ORDER BY sf_id;
+----
+006Dn0000000002IAA
+006Dn0000000005IAA
+
+query TT
+SELECT sf_id, deleted_date FROM salesforce.main.deleted_ids('Opportunity', TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMPTZ '2026-01-08 00:00:00+00');
+----
+006Dn0000000099IAA	2026-01-06 12:00:00+00
+
+# Outside the recycle-bin retention the delete set would be incomplete: an explicit error.
+statement error
+SELECT * FROM salesforce.main.deleted_ids('Opportunity', TIMESTAMPTZ '2025-11-01 00:00:00+00', TIMESTAMPTZ '2026-01-08 00:00:00+00');
+----
+<REGEX>:.*before the earliest date.*full reload.*
+
+# A 70-day window is split into three 30-day getUpdated requests.
 statement ok
-DROP SECRET salesforce_api_test;
+SELECT * FROM read_json('{SALESFORCE_FIXTURE_URL}/__reset?t=rep');
 
-# base_url must be http(s).
-statement error
-SELECT * FROM salesforce.main.fetch_items('ftp://example.com');
+query I
+SELECT count(*) FROM salesforce.main.updated_ids('Account', TIMESTAMPTZ '2025-11-01 00:00:00+00', TIMESTAMPTZ '2026-01-10 00:00:00+00');
 ----
-<REGEX>:.*
+3
 
-# page_size is a named argument constrained to [1, 1000].
-statement error
-SELECT * FROM salesforce.main.fetch_items('{SALESFORCE_MOCK_API}', page_size := 0);
+query T
+SELECT DISTINCT qs FROM read_json('{SALESFORCE_FIXTURE_URL}/__requests?t=rep') WHERE path LIKE '%/sobjects/Account/updated/' ORDER BY qs;
 ----
-<REGEX>:.*
-
-statement error
-SELECT * FROM salesforce.main.fetch_items('{SALESFORCE_MOCK_API}', page_size := 5000);
-----
-<REGEX>:.*
+end=2025-12-01T00:00:00+00:00&start=2025-11-01T00:00:00+00:00
+end=2025-12-31T00:00:00+00:00&start=2025-12-01T00:00:00+00:00
+end=2026-01-10T00:00:00+00:00&start=2025-12-31T00:00:00+00:00

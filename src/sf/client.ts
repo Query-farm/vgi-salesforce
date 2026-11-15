@@ -226,6 +226,7 @@ export interface ApiUsage {
   at: number;
 }
 const usage = new Map<string, ApiUsage>();
+export const USAGE_FRESH_MS = 60_000;
 
 /** Parse `api-usage=18/15000` out of a Sforce-Limit-Info header. */
 export function parseLimitInfo(header: string | null): { used: number; max: number } | null {
@@ -248,6 +249,9 @@ export function resetUsage(): void {
 function guard(cfg: SfConfig): void {
   const u = usage.get(cfg.instanceUrl);
   if (!u || u.max <= 0 || cfg.quotaGuardPct >= 100) return;
+  // A reading older than a minute is re-measured by letting one call through (usage is a
+  // rolling 24-hour count, so a long-lived worker must not stay blocked on a stale value).
+  if (Date.now() - u.at > USAGE_FRESH_MS) return;
   const pct = (100 * u.used) / u.max;
   if (pct >= cfg.quotaGuardPct) {
     throw new SalesforceError(
