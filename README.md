@@ -229,8 +229,8 @@ never written to scan state or logs; a 401 re-authenticates once.
 The brief made a schema-explosion spike a precondition. There is no live org here, so it was
 run against a **synthetic org** served by the replay server (`synthetic_objects=N`: N custom
 objects of 24 fields plus `Wide__c` with 907 fields, describe payloads in the documented
-shape), with the real worker over stdio through Haybarn 2.0.0rc11 on an M-series Mac.
-Re-run: `uv run --no-project --with haybarn==2.0.0rc11 --with pytz python scripts/schema_spike.py`.
+shape), with the real worker over stdio through Haybarn 2.0.1rc3 on an M-series Mac.
+Re-run: `uv run --no-project --with haybarn==2.0.1rc3 --with pytz python scripts/schema_spike.py`.
 
 | objects in `OBJECTS` | 51 | 201 | 1,501 |
 |---|---|---|---|
@@ -275,7 +275,7 @@ LOAD vgi FROM query_farm;
 ATTACH 'salesforce' (TYPE vgi, LOCATION '/abs/path/to/vgi-salesforce/bin/vgi-salesforce-worker');
 ```
 
-**Haybarn 2.0** (`uvx haybarn-cli`):
+**Haybarn 2.0.1+** (`uvx haybarn-cli`; Haybarn 2.0.0 serves an older vgi extension that cannot attach this worker):
 
 ```sql
 INSTALL vgi FROM community;

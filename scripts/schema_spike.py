@@ -13,7 +13,7 @@ Measures, at 50 / 200 / 1,500 objects named in ATTACH OBJECTS:
   - worker RSS after binding every object (describe cache for all N objects: the
     memory that a per-object generated family would hold)
 
-Usage: uv run --no-project --with haybarn==2.0.0rc11 --with pytz python scripts/schema_spike.py
+Usage: uv run --no-project --with haybarn==2.0.1rc3 --with pytz python scripts/schema_spike.py
 """
 
 import json
